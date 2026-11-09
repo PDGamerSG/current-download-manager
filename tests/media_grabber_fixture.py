@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
+from fixture_server import LoopbackHTTPServer
 
 
 def main():
@@ -51,7 +52,7 @@ def main():
         def log_message(self, *_):
             pass
 
-    foreign = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Foreign)
+    foreign = LoopbackHTTPServer(("127.0.0.1", 0), Foreign)
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
@@ -146,7 +147,7 @@ def main():
         def log_message(self, *_):
             pass
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=foreign.serve_forever, daemon=True).start()
     pathlib.Path(args.ready).write_text(json.dumps({"port": server.server_port, "foreignPort": foreign.server_port}))
     server.serve_forever()

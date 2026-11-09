@@ -77,7 +77,7 @@ Direct audio/video downloads are supported by the native engine. Clear HLS/DASH 
 
 `tests/extension.test.mjs` runs the shared URL/cookie/media/handoff logic and executes the generated Chromium and Firefox background scripts against explicit browser/native API fixtures. It checks GET/POST correlation, native acknowledgement ordering, pause/resume fallback, error reporting, capture opt-in and per-tab cleanup. Generated JavaScript is syntax-checked for both browser packages. These Node fixture checks are separate from real browser tests. `tests/browser-e2e.mjs` exercises Chromium and `tests/firefox-e2e.mjs` exercises Firefox against the real native host and byte-verified local fixture files.
 
-The T3 preview route rejected the browser extension-manager protocol, so real tests use isolated Playwright browsers. Firefox loads the local package temporarily through its supported DevTools add-on actor; its popup DOM controls are driven through that actor because Playwright/Juggler cannot attach to privileged extension pages. See `.artifacts/extension-report.md` for exact checks and limits. These tests back up and restore per-user native host manifests; run them sequentially, not in parallel.
+The T3 preview route rejected the browser extension-manager protocol, so real tests use isolated Playwright browsers. Firefox loads the local package temporarily through its supported DevTools add-on actor; its popup DOM controls are driven through that actor because Playwright/Juggler cannot attach to privileged extension pages. See [testing details](../docs/TESTING.md) for recorded checks and limits. These tests back up and restore per-user native host manifests; run them sequentially, not in parallel.
 
 ## Protocol for maintainers
 

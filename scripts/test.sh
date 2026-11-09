@@ -22,6 +22,7 @@ swift build --build-system native --product CurrentCoreTests
 .build/debug/CurrentCoreTests
 node extensions/build.mjs
 node --test tests/extension.test.mjs
+python3 tests/fixture_test.py
 python3 tests/integration.py
 python3 tests/regressions.py
 python3 tests/run_media.py

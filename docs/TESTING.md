@@ -24,6 +24,7 @@ Development tools still generate the test fixtures. To test the packaged tools t
 
 | Suite | What it proves |
 | --- | --- |
+| `tests/fixture_test.py` | Real loopback HTTP startup and complete payload delivery with reverse DNS disabled |
 | `CurrentCoreTests` | URL/header/filename/number validation, native framing, categories, schedules and export redaction |
 | `tests/integration.py` | Segmented HTTP, retries, disconnects, auth/cookies/referer, proxy, queue/schedule policy, limits/quota, checksums, refresh, persistence, batches, category, scanner, native framing and bridge isolation |
 | `tests/regressions.py` | Atomic failed batches, changed-destination preservation, generation-safe completion, no hidden Metalink transfers, host-bound cookies, oversized numeric rejection, deletion ownership, scanner-time replacement and unrelated sidecar preservation |
@@ -59,3 +60,8 @@ The first hosted macOS 15 build exposed an SDK name-resolution issue in the
 media spawn call. Current main uses the compatible Darwin `_np` spelling;
 source builds with an older SDK should use main instead of the original
 0.1.0 tag. The downloaded macOS 27 application passed its packaged test gate.
+
+Hosted macOS also exposed a reverse-DNS stall in Python's HTTP server startup.
+The local HTTP and media fixtures now bind numeric loopback addresses without
+hostname lookup. A regression check rejects any reverse-DNS call during startup
+and verifies a complete HTTP response.

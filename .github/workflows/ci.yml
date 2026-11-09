@@ -38,6 +38,7 @@ jobs:
             python3 tests/run_media.py
           elif [[ "${{ inputs.suite }}" == "browsers" ]]; then
             swift build --build-system native --product currentctl
+            python3 tests/fixture_test.py
             node tests/browser-e2e.mjs
             node tests/firefox-e2e.mjs
           else

@@ -4,15 +4,16 @@ import json
 import socket
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from http.cookies import SimpleCookie
 from urllib.parse import urlsplit
+from fixture_server import LoopbackHTTPServer
 
 PAYLOAD = bytes(range(256)) * (48 * 1024)  # 12 MiB, independently hashable.
 TINY = b"Current fixture\n" * 4096
 
 
-class Fixture(ThreadingHTTPServer):
+class Fixture(LoopbackHTTPServer):
     daemon_threads = True
 
     def __init__(self):
@@ -102,8 +103,7 @@ def start_fixture():
 
 if __name__ == "__main__":
     import faulthandler
-    # Hosted macOS can stall during system hostname resolution. Keep a stack
-    # trace if fixture startup blocks so browser failures retain the cause.
+    # Retain diagnostics if startup blocks before the browser's ready deadline.
     faulthandler.dump_traceback_later(8)
     fixture = start_fixture()
     faulthandler.cancel_dump_traceback_later()
