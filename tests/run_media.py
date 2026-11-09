@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from integration import wait_for
+from integration import wait_for_fixture
 import json
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +27,7 @@ def main():
                 "--directory", str(folder / "fixture"), "--ready", str(ready)
             ], stdout=log, stderr=log, cwd=ROOT)
             try:
-                wait_for(ready.exists, 20, "media fixture")
+                wait_for_fixture(fixture, ready, folder / "fixture.log")
                 url = "http://127.0.0.1:%s" % json.loads(ready.read_text())["port"]
                 for mode in ["all", "await-tree", "timeout"]:
                     subprocess.run([str(output), url, str(folder / mode), mode], check=True, cwd=ROOT, timeout=180)

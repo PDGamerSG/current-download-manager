@@ -31,6 +31,18 @@ def wait_for(fn, timeout=25, label="condition"):
     raise AssertionError("Timed out waiting for %s; last=%r" % (label, last))
 
 
+def wait_for_fixture(process, ready, log, timeout=60):
+    """Report an exited generator immediately, including its private test log."""
+    def running():
+        if process.poll() is not None:
+            raise AssertionError("Media fixture exited with code %s:\n%s" % (process.returncode, Path(log).read_text(errors="replace")[-12000:]))
+        return ready.exists()
+    try:
+        return wait_for(running, timeout, "media fixture readiness")
+    except AssertionError as error:
+        raise AssertionError("%s\nFixture log:\n%s" % (error, Path(log).read_text(errors="replace")[-12000:])) from error
+
+
 class Harness:
     def __init__(self, folder):
         self.folder = Path(folder); self.env = {**os.environ, "CURRENT_STATE_DIR":str(self.folder / "state")}

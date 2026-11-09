@@ -6,7 +6,7 @@ import json,os,plistlib,shutil,subprocess,sys,tempfile
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/"tests"))
-from integration import Harness,wait_for
+from integration import Harness,wait_for_fixture
 from media_service import decoded_video_hash
 root=ROOT
 with tempfile.TemporaryDirectory(prefix='current-cross-volume-') as temporary:
@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory(prefix='current-cross-volume-') as temporary:
   device=attachment['system-entities'][0]['dev-entry'];destination=Path(mount['mount-point'])/'downloads';destination.mkdir()
   ready=folder/'ready.json';fixture_folder=folder/'fixture';log=open(folder/'fixture.log','wb')
   fixture=subprocess.Popen([sys.executable,str(root/'tests/media_grabber_fixture.py'),'--directory',str(fixture_folder),'--ready',str(ready)],stdout=log,stderr=log)
-  wait_for(ready.exists,20,'cross-volume fixture')
+  wait_for_fixture(fixture,ready,folder/'fixture.log')
   h.start();url='http://127.0.0.1:%s/media/stream.m3u8'%json.loads(ready.read_text())['port']
   job=h.add(url,kind='media',filename='external.mp4',directory=str(destination),headers={'Cookie':'fixture=secret','Referer':'https://fixture.invalid/private'},connections=1)
   job=h.completed(job);target=destination/job['filename']

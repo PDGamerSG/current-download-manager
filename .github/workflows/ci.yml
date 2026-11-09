@@ -3,6 +3,12 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      suite:
+        description: Acceptance suite
+        type: choice
+        options: [full, media]
+        default: full
 permissions:
   contents: read
 jobs:
@@ -27,4 +33,9 @@ jobs:
       - name: Run source and real browser checks
         env:
           CURRENT_BROWSER_HEADLESS: '1'
-        run: scripts/test.sh --protocols --browsers
+        run: |
+          if [[ "${{ inputs.suite }}" == "media" ]]; then
+            python3 tests/run_media.py
+          else
+            scripts/test.sh --protocols --browsers
+          fi

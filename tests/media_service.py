@@ -13,7 +13,7 @@ import tempfile
 import time
 import urllib.request
 
-from integration import Harness, wait_for
+from integration import Harness, wait_for, wait_for_fixture
 from fixture import PAYLOAD, start_fixture
 
 
@@ -100,7 +100,7 @@ def main():
         h = Harness(folder)
         state = folder / "state"
         try:
-            wait_for(ready.exists, 15, "media fixture readiness")
+            wait_for_fixture(fixture, ready, folder / "fixture.log")
             media_url = "http://127.0.0.1:%s/media/stream.m3u8" % json.loads(ready.read_text())["port"]
             expected = decoded_video_hash(ffmpeg, media_folder / "stream.m3u8")
             assert expected[1] == 96 * 64 * 3 // 2 * 12 * 16, expected
