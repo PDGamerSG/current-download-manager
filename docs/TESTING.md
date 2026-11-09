@@ -54,3 +54,8 @@ The native window was launched against actual fixture downloads; completed, acti
 The shared preview browser rejected `chrome://extensions` as an unsupported URL. The actual extension acceptance suites therefore use isolated Playwright browser profiles. Firefox automation loads a temporary development add-on through Firefox's supported remote debugging mechanism; it does not prove a signed permanent installation.
 
 No test claims arbitrary production website compatibility, DRM support, Safari, Windows IDM runtime behavior, Intel, or older macOS release compatibility. Local fixture success is repeatable evidence for the documented behavior, not a guarantee that every remote server or media site permits downloading.
+
+The first hosted macOS 15 build exposed an SDK name-resolution issue in the
+media spawn call. Current main uses the compatible Darwin `_np` spelling;
+source builds with an older SDK should use main instead of the original
+0.1.0 tag. The downloaded macOS 27 application passed its packaged test gate.

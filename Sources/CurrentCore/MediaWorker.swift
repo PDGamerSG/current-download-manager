@@ -362,9 +362,9 @@ public final class MediaWorker: @unchecked Sendable {
         defer { posix_spawnattr_destroy(&attributes) }
         var signals = sigset_t(); sigemptyset(&signals); sigaddset(&signals, SIGINT); sigaddset(&signals, SIGTERM)
         var mask = sigset_t(); sigemptyset(&mask)
-        let directoryResult: Int32
-        if #available(macOS 26.0, *) { directoryResult = posix_spawn_file_actions_addchdir(&actions, workingDirectory.path) }
-        else { directoryResult = posix_spawn_file_actions_addchdir_np(&actions, workingDirectory.path) }
+        // The older spelling is also exported by current Darwin. Referencing
+        // the new name inside #available still fails to compile with older SDKs.
+        let directoryResult = posix_spawn_file_actions_addchdir_np(&actions, workingDirectory.path)
         guard posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0) == 0,
               directoryResult == 0,
               posix_spawn_file_actions_adddup2(&actions, logFD, STDOUT_FILENO) == 0,
