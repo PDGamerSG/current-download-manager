@@ -1,0 +1,12 @@
+.build/
+.swiftpm/
+.DS_Store
+.artifacts/
+dist/
+node_modules/
+*.aria2
+*.log
+__pycache__/
+.env
+test-results/
+playwright-report/
