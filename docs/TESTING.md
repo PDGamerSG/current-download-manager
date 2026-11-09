@@ -40,7 +40,7 @@ Swift tests use an executable target because this Command Line Tools installatio
 
 ## Recorded environment and boundaries
 
-The source suite currently reports 39 core assertions, 43 extension behavior tests,
+The source suite currently reports 39 core assertions, 51 extension behavior tests,
 16 HTTP acceptance groups, 9 regression groups, 81 standalone media/grabber
 assertions plus 4 process-tree and 1 timeout assertions, 6 media-service groups,
 and 2 FTP/SFTP groups, all passing on the recorded environment. A real public
@@ -57,11 +57,16 @@ The shared preview browser rejected `chrome://extensions` as an unsupported URL.
 No test claims arbitrary production website compatibility, DRM support, Safari, Windows IDM runtime behavior, Intel, or older macOS release compatibility. Local fixture success is repeatable evidence for the documented behavior, not a guarantee that every remote server or media site permits downloading.
 
 The first hosted macOS 15 build exposed an SDK name-resolution issue in the
-media spawn call. Current main uses the compatible Darwin `_np` spelling;
-source builds with an older SDK should use main instead of the original
+media spawn call. Version 0.1.1 uses the compatible Darwin `_np` spelling;
+source builds with an older SDK should use 0.1.1 or later instead of the original
 0.1.0 tag. The downloaded macOS 27 application passed its packaged test gate.
 
 Hosted macOS also exposed a reverse-DNS stall in Python's HTTP server startup.
 The local HTTP and media fixtures now bind numeric loopback addresses without
 hostname lookup. A regression check rejects any reverse-DNS call during startup
 and verifies a complete HTTP response.
+
+Firefox can deliver its download-created event before the matching GET event.
+Version 0.1.1 waits up to one second for positive GET evidence, then checks the
+browser download again before capture. Tests cover both browser API variants,
+late POST/GET overlap, and downloads completed or paused during that wait.

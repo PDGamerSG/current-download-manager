@@ -1,6 +1,6 @@
 {
   "name": "Current — Download Manager",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Send downloads and detected page media to the local Current macOS app.",
   "icons": {
     "16": "icons/icon16.png",

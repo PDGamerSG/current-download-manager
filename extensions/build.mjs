@@ -13,7 +13,7 @@ const calculated = [...createHash('sha256').update(Buffer.from(chromiumKey, 'bas
 if (calculated !== chromiumID) throw new Error('The stable Chromium key and native host ID no longer agree.');
 
 const common = {
-  name:'Current — Download Manager', version:'0.1.0', description:'Send downloads and detected page media to the local Current macOS app.',
+  name:'Current — Download Manager', version:'0.1.1', description:'Send downloads and detected page media to the local Current macOS app.',
   icons:{16:'icons/icon16.png', 32:'icons/icon32.png', 48:'icons/icon48.png', 128:'icons/icon128.png'},
   incognito:'not_allowed',
   content_scripts:[{matches:['http://*/*', 'https://*/*'], js:['content-core.js', 'content.js'], run_at:'document_idle', all_frames:true}]

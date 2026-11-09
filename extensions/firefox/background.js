@@ -271,17 +271,36 @@ return {api, isFirefox, callAPI, nativeMessage};
     (async () => {
       await ready;
       if (!captureEnabled || inHandoff.has(download.id)) return;
-      const url = normalizeURL(download.finalUrl || download.url, true);
-      const record = captureObservation(download, recentRequests);
-      // Unknown methods deliberately remain in the browser; replaying a POST as GET loses its body.
-      if (!record || download.state !== 'in_progress' || download.paused) return;
+      let url = normalizeURL(download.finalUrl || download.url, true);
+      if (!url || !normalizeURL(download.url, true) || download.state !== 'in_progress' || download.paused) return;
       inHandoff.add(download.id);
       try {
+        let record = captureObservation(download, recentRequests);
+        if (!record) {
+          // Firefox can dispatch onCreated before the corresponding webRequest
+          // event. Wait briefly for positive GET evidence without pausing an
+          // unknown/POST transfer. Recheck the actual download after waiting.
+          const deadline = Date.now() + 1000;
+          while (!record && captureEnabled && Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 25));
+            record = captureObservation(download, recentRequests);
+          }
+          if (!record || !captureEnabled) return;
+          const matches = await callAPI(api.downloads, 'search', {id:download.id});
+          const current = matches.find(item => item.id === download.id);
+          if (!current || current.state !== 'in_progress' || current.paused || normalizeURL(current.url, true) !== normalizeURL(download.url, true)) return;
+          download = current;
+          url = normalizeURL(download.finalUrl || download.url, true);
+          record = captureObservation(download, recentRequests);
+        }
+        // Unknown or unsafe request methods always remain in the browser.
+        if (!record || !captureEnabled) return;
         const pageURL = download.referrer || record.pageURL;
         const request = await requestForURL(url, {
           pageURL, filename:download.filename?.split(/[\\/]/).pop(),
           getCookies:options => callAPI(api.cookies, 'getAll', options)
         });
+        if (!captureEnabled || !captureObservation(download, recentRequests)) return;
         const result = await handoffBrowserDownload(download, record, request, {
           pause:id => callAPI(api.downloads, 'pause', id),
           resume:id => callAPI(api.downloads, 'resume', id),

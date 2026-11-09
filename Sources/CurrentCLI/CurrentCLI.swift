@@ -19,10 +19,10 @@ struct CurrentCLI {
             case "add":
                 guard args.count > 1 else { throw CurrentError.invalid("Usage: currentctl add <URL> [URL...]") }
                 printJSON(try await BridgeClient.request(.object(["action":.string("add"),"urls":.array(args.dropFirst().map{.string($0)})])))
-            case "version", "--version": print("Current 0.1.0")
+            case "version", "--version": print("Current 0.1.1")
             default:
                 print("""
-                Current 0.1.0 — native macOS download manager
+                Current 0.1.1 — native macOS download manager
                 Usage: currentctl serve                  Run the local engine
                        currentctl add <URL> [URL...]     Add downloads to a running app/service
                        currentctl list                   Print private local state as JSON
@@ -82,7 +82,7 @@ struct CurrentCLI {
             let keys = ["id","filename","directory","status","totalBytes","completedBytes","bytesPerSecond","createdAt","error"]
             return .object(value.object.filter{keys.contains($0.key)})
         }
-        if action == "status" { return .object(["jobs":.array(result["jobs"].array.suffix(500).map(job)),"version":.string("0.1.0"),"connected":.bool(true)]) }
+        if action == "status" { return .object(["jobs":.array(result["jobs"].array.suffix(500).map(job)),"version":.string("0.1.1"),"connected":.bool(true)]) }
         if action == "add" { return .array(result.array.map(job)) }
         return result
     }

@@ -65,6 +65,11 @@ The Firefox package uses Manifest V2 with a persistent classic background script
 
 POST, unknown request methods, redirects originating in POST, blob/data URLs, already paused and finished downloads stay in the browser. If a URL had an overlapping POST request, capture skips it conservatively. Context-menu and manual actions explicitly request a fresh URL download; they do not cancel any existing browser transfer. Native errors appear in the popup, a red toolbar badge and a browser notification. Repeated popup polling does not repeat the same notification.
 
+Browsers can deliver the download-created event before the request-method event.
+Current waits up to one second for positive GET evidence without pausing that
+transfer. It then checks that the browser download is still active and unpaused
+before attempting capture; missing or unsafe evidence leaves it in the browser.
+
 ## Cookies, privacy and supported media
 
 For every requested HTTP/HTTPS resource, `cookies.getAll({url})` retrieves destination-scoped cookies. The extension checks cookie domain, host-only flag, path and Secure scope again before building that URL's `Cookie` header. It never reads the popup's cookies and never attaches one URL's cookie header to a batch of unrelated URLs. Page referers follow the usual strict-origin-when-cross-origin shape; extension/internal page URLs and HTTPS-to-HTTP referers are omitted. The native app stores sensitive request headers privately and excludes them from browser status responses.

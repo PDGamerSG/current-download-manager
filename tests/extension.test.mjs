@@ -205,12 +205,13 @@ test('request observations stay bounded in a long-lived Firefox background page'
 // Browser APIs are the external boundary; the generated background worker is run unchanged.
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
-function event() {
+function event(beforeEmit = () => {}) {
   const listeners = [];
-  return {addListener:fn => listeners.push(fn), emit:(...args) => listeners.map(fn => fn(...args)), listeners};
+  return {addListener:fn => listeners.push(fn), emit:(...args) => { beforeEmit(...args); return listeners.map(fn => fn(...args)); }, listeners};
 }
 async function backgroundHarness({flavor = 'firefox', native = async message => ({ok:true, result:message.action === 'status' ? {jobs:[]} : [{id:'job-1'}]})} = {}) {
   const local = {}, session = {}, notifications = [], downloadEvents = [], cookies = [], nativeMessages = [], badges = [];
+  const downloadItems = new Map();
   const store = data => ({
     get:async keys => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter(key => key in data).map(key => [key, data[key]])),
     set:async values => { Object.assign(data, values); },
@@ -225,7 +226,7 @@ async function backgroundHarness({flavor = 'firefox', native = async message => 
     webRequest:{onBeforeRequest:event(), onHeadersReceived:event()},
     tabs:{onRemoved:event(), onUpdated:event(), sendMessage:async () => ({urls:[]})},
     cookies:{getAll:async options => { cookies.push(options); return []; }},
-    downloads:{onCreated:event(), pause:async id => { downloadEvents.push(`pause:${id}`); }, resume:async id => { downloadEvents.push(`resume:${id}`); }, cancel:async id => { downloadEvents.push(`cancel:${id}`); }}
+    downloads:{onCreated:event(item => downloadItems.set(item.id, {...item})), search:async ({id}) => downloadItems.has(id) ? [downloadItems.get(id)] : [], pause:async id => { downloadEvents.push(`pause:${id}`); }, resume:async id => { downloadEvents.push(`resume:${id}`); }, cancel:async id => { downloadEvents.push(`cancel:${id}`); }}
   };
   const unhandledErrors = [];
   if (flavor === 'chromium') {
@@ -250,7 +251,7 @@ async function backgroundHarness({flavor = 'firefox', native = async message => 
   await new Promise(resolve => setImmediate(resolve));
   const message = (value, sender = {id:browser.runtime.id, url:browser.runtime.getURL('popup.html')}) => new Promise(resolve => browser.runtime.onMessage.emit(value, sender, resolve));
   const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(resolve => setImmediate(resolve)); };
-  return {browser, local, session, notifications, downloadEvents, cookies, nativeMessages, badges, unhandledErrors, message, settle};
+  return {browser, local, session, notifications, downloadItems, downloadEvents, cookies, nativeMessages, badges, unhandledErrors, message, settle};
 }
 
 test('generated background capture starts off and requires an explicit opt-in', async () => {
@@ -443,3 +444,46 @@ test('navigation cleanup cannot erase a GET observed immediately after Firefox s
   await h.settle();
   assert.deepEqual(h.downloadEvents, ['pause:29', 'cancel:29']);
 });
+
+for (const flavor of ['chromium', 'firefox']) {
+  test(`${flavor} captures a GET observation delivered after the download-created event`, async () => {
+    const h = await backgroundHarness({flavor});
+    await h.message({action:'set-capture', enabled:true});
+    h.browser.downloads.onCreated.emit({id:30, url:'https://example.com/late-get', state:'in_progress', paused:false});
+    await h.settle();
+    assert.deepEqual(h.downloadEvents, []);
+    h.browser.webRequest.onBeforeRequest.emit({url:'https://example.com/late-get', method:'GET', tabId:1});
+    await new Promise(resolve => setTimeout(resolve, 60));
+    await h.settle();
+    assert.deepEqual(h.downloadEvents, ['pause:30', 'cancel:30']);
+    assert.equal(h.nativeMessages.filter(message => message.action === 'add').length, 1);
+  });
+
+  test(`${flavor} never captures a late POST followed by an overlapping GET`, async () => {
+    const h = await backgroundHarness({flavor});
+    await h.message({action:'set-capture', enabled:true});
+    h.browser.downloads.onCreated.emit({id:31, url:'https://example.com/late-post', state:'in_progress', paused:false});
+    await h.settle();
+    h.browser.webRequest.onBeforeRequest.emit({url:'https://example.com/late-post', method:'POST', tabId:1});
+    h.browser.webRequest.onBeforeRequest.emit({url:'https://example.com/late-post', method:'GET', tabId:1});
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    await h.settle();
+    assert.deepEqual(h.downloadEvents, []);
+    assert.equal(h.nativeMessages.length, 0);
+  });
+
+  for (const state of ['complete', 'paused']) {
+    test(`${flavor} leaves a download that became ${state} while awaiting its GET in the browser`, async () => {
+      const h = await backgroundHarness({flavor});
+      await h.message({action:'set-capture', enabled:true});
+      h.browser.downloads.onCreated.emit({id:32, url:'https://example.com/late-finished', state:'in_progress', paused:false});
+      await h.settle();
+      h.downloadItems.set(32, {id:32, url:'https://example.com/late-finished', state:state === 'complete' ? 'complete' : 'in_progress', paused:state === 'paused'});
+      h.browser.webRequest.onBeforeRequest.emit({url:'https://example.com/late-finished', method:'GET', tabId:1});
+      await new Promise(resolve => setTimeout(resolve, 60));
+      await h.settle();
+      assert.deepEqual(h.downloadEvents, []);
+      assert.equal(h.nativeMessages.length, 0);
+    });
+  }
+}

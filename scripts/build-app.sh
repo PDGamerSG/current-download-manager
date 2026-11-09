@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-VERSION="${CURRENT_VERSION:-0.1.0}"
+VERSION="${CURRENT_VERSION:-0.1.1}"
 YT_DLP_VERSION="${CURRENT_YT_DLP_VERSION:-2026.10.26}"
 mkdir -p dist .artifacts/tools
 if [[ ! -x .artifacts/tools/yt-dlp_macos ]]; then

@@ -10,7 +10,7 @@ Current is an original open source application inspired by IDM's publicly docume
 
 Download the app and extension archives from [Releases](https://github.com/PDGamerSG/current-download-manager/releases).
 
-The prebuilt **0.1.0 app requires Apple silicon and macOS 27 or later** because its bundled Homebrew libraries were built for that OS. Intel and older macOS releases are not verified. The Swift package targets macOS 13 for source builds with compatible dependencies.
+The prebuilt **0.1.1 app requires Apple silicon and macOS 27 or later** because its bundled Homebrew libraries were built for that OS. Intel and older macOS releases are not verified. The Swift package targets macOS 13 for source builds with compatible dependencies.
 
 1. Extract the macOS ZIP and move **Current.app** into `/Applications` or `~/Applications`.
 2. Open Current. This release is ad hoc signed, without Developer ID signing or Apple notarization. If macOS blocks it, review the source/release and use **System Settings → Privacy & Security → Open Anyway**.
