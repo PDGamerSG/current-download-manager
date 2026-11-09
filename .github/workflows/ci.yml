@@ -7,7 +7,7 @@ on:
       suite:
         description: Acceptance suite
         type: choice
-        options: [full, media]
+        options: [full, media, browsers]
         default: full
 permissions:
   contents: read
@@ -36,6 +36,10 @@ jobs:
         run: |
           if [[ "${{ inputs.suite }}" == "media" ]]; then
             python3 tests/run_media.py
+          elif [[ "${{ inputs.suite }}" == "browsers" ]]; then
+            swift build --build-system native --product currentctl
+            node tests/browser-e2e.mjs
+            node tests/firefox-e2e.mjs
           else
             scripts/test.sh --protocols --browsers
           fi

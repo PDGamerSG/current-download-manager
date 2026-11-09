@@ -160,6 +160,7 @@ try {
   let fixtureURL = '';
   fixture.stdout.on('data', data => { fixtureURL += data.toString(); });
   fixture.stderr.on('data', data => { diagnostics += `Fixture: ${data}`; });
+  fixture.on('error', error => { diagnostics += `Fixture process: ${error.message}\n`; });
   await until(() => fixtureURL.includes('\n'), 'fixture readiness');
   fixtureURL = fixtureURL.trim();
 

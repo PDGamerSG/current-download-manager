@@ -101,7 +101,13 @@ def start_fixture():
 
 
 if __name__ == "__main__":
-    fixture = start_fixture(); print(fixture.url, flush=True)
+    import faulthandler
+    # Hosted macOS can stall during system hostname resolution. Keep a stack
+    # trace if fixture startup blocks so browser failures retain the cause.
+    faulthandler.dump_traceback_later(8)
+    fixture = start_fixture()
+    faulthandler.cancel_dump_traceback_later()
+    print(fixture.url, flush=True)
     try:
         while True: time.sleep(1)
     except KeyboardInterrupt: fixture.shutdown()

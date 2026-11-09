@@ -34,6 +34,8 @@ try {
   fixture = spawn('python3',['-u',join(root,'tests/fixture.py')],{stdio:['ignore','pipe','pipe']});
   let fixtureURL = '';
   fixture.stdout.on('data',data=>{fixtureURL += data.toString();});
+  fixture.stderr.on('data',data=>{serviceLog += `Fixture: ${data}`;});
+  fixture.on('error',error=>{serviceLog += `Fixture process: ${error.message}\n`;});
   await until(()=>fixtureURL.includes('\n'),'fixture readiness'); fixtureURL=fixtureURL.trim();
   service = spawn(cli,['serve'],{env,stdio:['ignore','pipe','pipe']});
   service.stdout.on('data',data=>{serviceLog+=data;}); service.stderr.on('data',data=>{serviceLog+=data;});
