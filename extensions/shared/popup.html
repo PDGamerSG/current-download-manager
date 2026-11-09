@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Current</title><link rel="stylesheet" href="popup.css"></head>
+<body>
+  <header><img src="icons/icon32.png" alt="" width="28" height="28"><div><h1>Current</h1><p id="connection" role="status">Connecting to the app…</p></div><button id="refresh" class="icon-button" aria-label="Refresh downloads" title="Refresh">↻</button></header>
+  <div id="error" class="error" role="alert" hidden><span id="error-text"></span><button id="dismiss-error" aria-label="Dismiss error">×</button></div>
+  <form id="add-form"><label for="urls">Add download</label><textarea id="urls" rows="2" spellcheck="false" placeholder="Paste a URL, or one per line" required></textarea><div class="form-footer"><span>HTTP, HTTPS, FTP, SFTP</span><button type="submit" id="add-button" class="primary">Add to Current</button></div></form>
+  <div class="capture"><div><label for="capture">Capture browser downloads</label><p>Pauses a download while Current accepts it.</p></div><input type="checkbox" id="capture" role="switch" aria-label="Capture browser downloads"></div>
+  <section aria-labelledby="media-title"><div class="section-title"><h2 id="media-title">Media on this page</h2><span id="media-count"></span></div><p id="media-empty" class="empty">Play a video to discover available media.</p><ul id="media-list"></ul></section>
+  <section aria-labelledby="downloads-title"><div class="section-title"><h2 id="downloads-title">Recent downloads</h2><span id="downloads-count"></span></div><p id="downloads-empty" class="empty">Your downloads will appear here.</p><ul id="downloads-list"></ul></section>
+  <footer><a href="help.html" target="_blank" rel="noopener">Setup &amp; browser support</a><span id="feedback" role="status" aria-live="polite"></span></footer>
+  <script src="popup.mjs" type="module"></script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+name: Build and acceptance tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install test tools
+        run: |
+          brew install aria2 ffmpeg yt-dlp
+          python3 -m pip install -r requirements-test.txt
+          npm ci
+          npx playwright install chromium firefox
+      - name: Run source and real browser checks
+        env:
+          CURRENT_BROWSER_HEADLESS: '1'
+        run: scripts/test.sh --protocols --browsers

@@ -13,6 +13,6 @@ let package = Package(
         .target(name: "CurrentCore"),
         .executableTarget(name: "CurrentApp", dependencies: ["CurrentCore"]),
         .executableTarget(name: "CurrentCLI", dependencies: ["CurrentCore"]),
-        .executableTarget(name: "CurrentCoreTests", dependencies: ["CurrentCore"], path: "Tests/CurrentCoreTests")
+        .executableTarget(name: "CurrentCoreTests", dependencies: ["CurrentCore"], path: "tests/CurrentCoreTests")
     ]
 )

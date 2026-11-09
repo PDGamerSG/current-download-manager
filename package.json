@@ -1,0 +1,12 @@
+{
+  "name": "current-download-manager-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/extension.test.mjs",
+    "test:browser": "node tests/browser-e2e.mjs",
+    "test:firefox": "node tests/firefox-e2e.mjs"
+  },
+  "devDependencies": {"playwright": "^1.58.0"}
+}

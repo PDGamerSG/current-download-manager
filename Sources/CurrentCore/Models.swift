@@ -30,7 +30,8 @@ public enum JSONValue: Codable, Equatable {
     public var object: [String: JSONValue] { if case .object(let v) = self { return v }; return [:] }
     public var array: [JSONValue] { if case .array(let v) = self { return v }; return [] }
     public var string: String { if case .string(let v) = self { return v }; return "" }
-    public var int: Int { if case .number(let v) = self { return Int(v) }; return Int(string) ?? 0 }
+    public var integer: Int? { if case .number(let v) = self { return Int(exactly:v) }; return Int(string) }
+    public var int: Int { integer ?? 0 }
     public var bool: Bool { if case .bool(let v) = self { return v }; return false }
     public subscript(_ key: String) -> JSONValue { object[key] ?? .null }
     public static func from<T: Encodable>(_ value: T) throws -> JSONValue { try JSONDecoder.current.decode(Self.self, from: JSONEncoder.current.encode(value)) }
@@ -93,6 +94,7 @@ public struct DownloadRequest: Codable, Equatable {
             guard !key.isEmpty, key.unicodeScalars.allSatisfy({ !forbidden.contains($0) }),
                   !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { throw CurrentError.invalid("A request header contains invalid characters.") }
             guard !["host", "content-length", "connection", "transfer-encoding"].contains(key.lowercased()) else { throw CurrentError.invalid("This header is managed by the download engine: \(key)") }
+            guard key.lowercased() != "authorization" else { throw CurrentError.invalid("Use the username and password fields for HTTP authentication. Raw Authorization headers cannot be safely scoped across redirects by this engine.") }
         }
         guard (1...16).contains(connections), speedLimit >= 0 else { throw CurrentError.invalid("Connections must be 1–16; speed limits must be nonnegative.") }
         if let checksum, !checksum.isEmpty {
@@ -191,6 +193,10 @@ public struct DownloadJob: Codable, Equatable, Identifiable {
     public var completedAt: Date?
     public var priority: Int = 0
     public var scanResult: String?
+    public var fileDevice: UInt64?
+    public var fileInode: UInt64?
+    public var hasStarted: Bool? = false
+    public var needsVerification: Bool?
     public init(request: DownloadRequest, filename: String, directory: String, categoryID: String) {
         self.request = request; self.filename = filename; self.directory = directory; self.categoryID = categoryID
         if request.startPaused { self.intent = .paused; self.status = .paused }
