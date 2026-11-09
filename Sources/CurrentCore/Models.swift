@@ -125,6 +125,7 @@ public struct Category: Codable, Equatable, Identifiable {
     public var name: String
     public var extensions: [String]
     public var hosts: [String]
+    public var directory: String?
     public init(id: String, name: String, extensions: [String], hosts: [String] = []) { self.id = id; self.name = name; self.extensions = extensions; self.hosts = hosts }
     public func matches(_ url: URL) -> Bool {
         if extensions.map({ $0.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")) }).contains(url.pathExtension.lowercased()) { return true }
@@ -149,14 +150,26 @@ public struct QueueSchedule: Codable, Equatable {
     public var start: Date
     public var end: Date?
     public var daily: Bool
+    public var weekdays: [Int]?
     public init(start: Date, end: Date? = nil, daily: Bool = false) { self.start = start; self.end = end; self.daily = daily }
     public func contains(_ date: Date, calendar: Calendar = .current) -> Bool {
         guard date >= start else { return false }
         guard daily else { return end.map { date < $0 } ?? true }
-        guard let end else { return true }
+        guard let end else { return weekdays.map { $0.contains(calendar.component(.weekday, from: date)) } ?? true }
         func seconds(_ date: Date) -> Int { let c = calendar.dateComponents([.hour,.minute,.second], from:date); return (c.hour ?? 0)*3600+(c.minute ?? 0)*60+(c.second ?? 0) }
         let s = seconds(start), e = seconds(end), n = seconds(date)
-        return s < e ? n >= s && n < e : n >= s || n < e
+        guard s < e ? n >= s && n < e : n >= s || n < e else { return false }
+        // An overnight window belongs to the weekday on which it opened.
+        let anchor = s >= e && n < e ? (calendar.date(byAdding: .day, value: -1, to: date) ?? date) : date
+        return weekdays.map { $0.contains(calendar.component(.weekday, from: anchor)) } ?? true
+    }
+    public func validate() throws {
+        if let end, end <= start { throw CurrentError.invalid("The schedule end must follow its start; use the next day for an overnight window.") }
+        if let weekdays {
+            guard daily, !weekdays.isEmpty, Set(weekdays).count == weekdays.count, weekdays.allSatisfy({ (1...7).contains($0) }) else {
+                throw CurrentError.invalid("Choose at least one distinct weekday (1 is Sunday through 7 is Saturday) for a repeating schedule.")
+            }
+        }
     }
 }
 
@@ -166,14 +179,49 @@ public struct DownloadQueue: Codable, Equatable, Identifiable {
     public var maxConcurrent: Int
     public var enabled: Bool
     public var schedule: QueueSchedule?
+    public var synchronizationIntervalSeconds: Int?
     public init(id: String = UUID().uuidString, name: String = "New queue", maxConcurrent: Int = 2, enabled: Bool = true, schedule: QueueSchedule? = nil) {
         self.id = id; self.name = name; self.maxConcurrent = maxConcurrent; self.enabled = enabled; self.schedule = schedule
     }
     public func isEligible(at date: Date) -> Bool { enabled && (schedule?.contains(date) ?? true) }
+    public func validate() throws {
+        guard !id.isEmpty, !name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty, (1...32).contains(maxConcurrent) else { throw CurrentError.invalid("Name the queue and choose 1–32 simultaneous downloads.") }
+        try schedule?.validate()
+        if let interval = synchronizationIntervalSeconds {
+            guard (60...31_536_000).contains(interval) else { throw CurrentError.invalid("Choose an update interval between 60 seconds and 365 days.") }
+        }
+    }
 }
 
 public enum JobStatus: String, Codable { case waiting, active, paused, complete, error, cancelled }
 public enum JobIntent: String, Codable { case running, paused, cancelled }
+public struct SynchronizedVersion: Codable, Equatable, Identifiable {
+    public var id: String
+    public var filename: String
+    public var directory: String
+    public var bytes: Int64
+    public var savedAt: Date
+    public init(job: DownloadJob) { id = UUID().uuidString; filename = job.filename; directory = job.directory; bytes = job.completedBytes; savedAt = job.completedAt ?? Date() }
+    public var fileURL: URL { URL(fileURLWithPath: directory).appendingPathComponent(filename) }
+}
+public struct DownloadSynchronization: Codable, Equatable {
+    public var baseFilename: String
+    public var status: String = "idle"
+    public var paused: Bool = false
+    public var checkCount: Int = 0
+    public var checkedAt: Date?
+    public var nextCheckAt: Date?
+    public var etag: String?
+    public var lastModified: String?
+    public var lastError: String?
+    public var pendingJobID: String?
+    public var candidateETag: String?
+    public var candidateLastModified: String?
+    public var receivedBytes: Int64 = 0
+    public var totalBytes: Int64 = 0
+    public var versions: [SynchronizedVersion] = []
+    public init(filename: String) { baseFilename = filename }
+}
 public struct DownloadJob: Codable, Equatable, Identifiable {
     public var id: String = UUID().uuidString
     public var gid: String?
@@ -197,6 +245,9 @@ public struct DownloadJob: Codable, Equatable, Identifiable {
     public var fileInode: UInt64?
     public var hasStarted: Bool? = false
     public var needsVerification: Bool?
+    public var description: String?
+    public var synchronization: DownloadSynchronization?
+    public var synchronizationParentID: String?
     public init(request: DownloadRequest, filename: String, directory: String, categoryID: String) {
         self.request = request; self.filename = filename; self.directory = directory; self.categoryID = categoryID
         if request.startPaused { self.intent = .paused; self.status = .paused }
@@ -215,8 +266,12 @@ public struct AppSettings: Codable, Equatable {
     public var clipboardDetection: Bool = false
     public var notifyOnCompletion: Bool = true
     public var scannerPath: String = ""
+    public var serverRules: [ServerRule]?
+    public var quotaPeriodSeconds: Int?
+    public var userAgent: String?
     public init() {}
     public func validated() throws -> AppSettings {
+        try validateNetworkPolicy()
         guard (1...32).contains(maxConcurrent), speedLimit >= 0, hourlyQuota >= 0, downloadDirectory.hasPrefix("/"), !downloadDirectory.contains("\0") else { throw CurrentError.invalid("Check the download folder, concurrency and bandwidth values.") }
         if !proxy.isEmpty {
             guard let url = URL(string:proxy), ["http","https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil,

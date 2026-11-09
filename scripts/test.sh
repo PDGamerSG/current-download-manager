@@ -20,11 +20,17 @@ swift build --build-system native --product Current
 swift build --build-system native --product currentctl
 swift build --build-system native --product CurrentCoreTests
 .build/debug/CurrentCoreTests
+swiftc -parse-as-library Sources/CurrentCore/Models.swift Sources/CurrentCore/NetworkPolicy.swift tests/schedule_main.swift -o .artifacts/schedule-checks
+.artifacts/schedule-checks
 node extensions/build.mjs
 node --test tests/extension.test.mjs
 python3 tests/fixture_test.py
 python3 tests/integration.py
 python3 tests/regressions.py
+python3 tests/features_v02.py
+python3 tests/network_policy.py
+python3 tests/synchronization.py
+python3 tests/run_website_projects.py
 python3 tests/run_media.py
 python3 tests/media_service.py
 if [[ "$PROTOCOLS" == 1 ]]; then python3 tests/protocols.py; fi

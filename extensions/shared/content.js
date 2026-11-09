@@ -13,6 +13,12 @@
     }));
   }
   function networkURL(value) { return globalThis.CurrentCore.resolveMediaURL(value, document.baseURI); }
+  document.addEventListener('click', event => {
+    if (!event.isTrusted || !event.altKey || event.button !== 0) return;
+    const anchor = event.target?.closest?.('a[href]');
+    const url = anchor && networkURL(anchor.href);
+    if (url) send({action:'bypass-capture', url}).catch(() => {});
+  }, true);
   function sources(element) {
     const candidates = [{url:element.currentSrc || element.src, mime:element.getAttribute('type') || ''}];
     for (const source of element.querySelectorAll('source[src]')) candidates.push({url:source.src, mime:source.type});

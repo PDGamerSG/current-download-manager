@@ -8,6 +8,9 @@ struct PreferencesView: View {
     @ViewState<AppSettings> private var draft: AppSettings
     @ViewState<String> private var rate: String
     @ViewState<String> private var quota: String
+    @ViewState<String> private var quotaWindow: String
+    @ViewState<String> private var userAgent: String
+    @ViewState<[ServerRule]> private var serverRules: [ServerRule]
     @ViewState<Bool> private var saving = false
     @ViewState<String?> private var errorMessage: String?
     @ViewState<CurrentCore.Category?> private var editingCategory: CurrentCore.Category?
@@ -18,6 +21,9 @@ struct PreferencesView: View {
         _draft = SwiftUI.State(initialValue: model.state.settings)
         _rate = SwiftUI.State(initialValue: Input.units(model.state.settings.speedLimit, multiplier: 1024))
         _quota = SwiftUI.State(initialValue: Input.units(model.state.settings.hourlyQuota, multiplier: 1_048_576))
+        _quotaWindow = SwiftUI.State(initialValue: String(model.state.settings.effectiveQuotaPeriodSeconds))
+        _userAgent = SwiftUI.State(initialValue: model.state.settings.userAgent ?? "")
+        _serverRules = SwiftUI.State(initialValue: model.state.settings.serverRules ?? [])
     }
 
     var body: some View {
@@ -53,7 +59,7 @@ struct PreferencesView: View {
                     TextField("Default folder", text: $draft.downloadDirectory)
                     Button("Choose…") { chooseFolder() }
                 }
-                Text("Automatic categories use subfolders inside this folder. A custom destination on a download takes precedence.")
+                Text("Categories use subfolders here unless they have a custom folder. A destination chosen on a download takes precedence.")
                     .font(.caption).foregroundColor(.secondary)
                 Stepper("Simultaneous downloads: \(draft.maxConcurrent)", value: $draft.maxConcurrent, in: 1...32)
             }
@@ -79,16 +85,45 @@ struct PreferencesView: View {
         Form {
             Section("Bandwidth") {
                 TextField("Global rate limit (KiB/s)", text: $rate, prompt: Text("Unlimited"))
-                TextField("Hourly quota (MiB)", text: $quota, prompt: Text("Unlimited"))
+                TextField("Quota per window (MiB)", text: $quota, prompt: Text("Unlimited"))
+                TextField("Quota window (seconds)", text: $quotaWindow, prompt: Text("3600"))
                 Text("Leave blank or enter 0 for no limit. Individual downloads can also have their own rate limits.")
                     .font(.caption).foregroundColor(.secondary)
+                Text("A window of 3600 seconds is 1 hour; 86400 is 1 day. The quota allowance resets at the end of each window.")
+                    .font(.caption).foregroundColor(.secondary)
                 if model.state.settings.hourlyQuota > 0 {
-                    LabeledContent("Used this hour", value: Display.bytes(model.state.quotaBytes))
+                    LabeledContent("Used in current window", value: Display.bytes(model.state.quotaBytes))
                 }
             }
             Section("Proxy") {
                 TextField("HTTP or HTTPS proxy", text: $draft.proxy, prompt: Text("http://proxy.example:8080"))
                 Text("Leave blank to connect directly. Optional proxy credentials remain in private local settings.")
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            Section("Server connections") {
+                ForEach($serverRules) { $rule in
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            TextField("Hostname", text: $rule.host, prompt: Text("example.org or *.example.org"))
+                            Button(role: .destructive) { serverRules.removeAll { $0.id == rule.id } } label: {
+                                Image(systemName: "minus.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Remove server rule")
+                            .accessibilityLabel("Remove server rule")
+                        }
+                        Stepper("Maximum connections: \(rule.maxConnections)", value: $rule.maxConnections, in: 1...16)
+                    }
+                }
+                Button { serverRules.append(ServerRule(host: "")) } label: {
+                    Label("Add server rule", systemImage: "plus")
+                }
+                Text("A hostname matches that server only. A wildcard such as *.example.org matches its subdomains. The most specific rule wins, and a download’s own connection count can be lower.")
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            Section("Requests") {
+                TextField("Manual download User-Agent", text: $userAgent, prompt: Text("Download engine default"))
+                Text("Leave blank to use the download engine’s default. A User-Agent supplied by the browser or on an individual download takes precedence.")
                     .font(.caption).foregroundColor(.secondary)
             }
         }
@@ -107,6 +142,9 @@ struct PreferencesView: View {
                         Text(category.name)
                         Text(category.extensions.isEmpty && category.hosts.isEmpty ? "Fallback category" : (category.extensions + category.hosts).joined(separator: ", "))
                             .font(.caption).foregroundColor(.secondary).lineLimit(1)
+                        if let directory = category.directory, !directory.isEmpty {
+                            Label(directory, systemImage: "folder").font(.caption).foregroundColor(.secondary).lineLimit(1).help(directory)
+                        }
                     }
                     Spacer()
                     Button("Edit…") { editingCategory = category }
@@ -170,7 +208,14 @@ struct PreferencesView: View {
             defer { saving = false }
             do {
                 draft.speedLimit = try Input.bytes(rate, multiplier: 1024, label: "Rate limit")
-                draft.hourlyQuota = try Input.bytes(quota, multiplier: 1_048_576, label: "Hourly quota")
+                draft.hourlyQuota = try Input.bytes(quota, multiplier: 1_048_576, label: "Quota")
+                guard let seconds = Int(quotaWindow.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+                    throw CurrentError.invalid("Enter the quota window as a whole number of seconds.")
+                }
+                draft.quotaPeriodSeconds = seconds
+                // Empty strings must be sent so the service's partial-settings merge clears an old value.
+                draft.userAgent = Input.optional(userAgent) ?? ""
+                draft.serverRules = try serverRules.map { try $0.validated() }
                 _ = try draft.validated()
                 try await model.send("settings", ["settings": try .from(draft)])
                 dismiss()

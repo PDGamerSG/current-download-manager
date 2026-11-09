@@ -6,6 +6,7 @@ public final class Aria2Engine {
     private var port: UInt16 = 0
     private let store: StateStore
     private let session: URLSession
+    private var defaultUserAgent = "aria2"
     public init(store: StateStore) {
         self.store = store
         let config = URLSessionConfiguration.ephemeral; config.timeoutIntervalForRequest = 8; config.connectionProxyDictionary = [:]
@@ -38,7 +39,12 @@ public final class Aria2Engine {
         try child.run(); process = child
         for _ in 0..<60 {
             guard child.isRunning else { throw CurrentError.invalid("aria2 could not start. Inspect the private engine.log in Application Support/Current.") }
-            if (try? await call("getVersion")) != nil { return }
+            if (try? await call("getVersion")) != nil {
+                if let options = try? await call("getGlobalOption"), !options["user-agent"].string.isEmpty {
+                    defaultUserAgent = options["user-agent"].string
+                }
+                return
+            }
             try await Task.sleep(nanoseconds:100_000_000)
         }
         child.terminate(); throw CurrentError.invalid("Timed out starting the download engine.")
@@ -55,14 +61,31 @@ public final class Aria2Engine {
         if value.object["error"] != nil { throw CurrentError.invalid(value["error"]["message"].string) }
         return value["result"]
     }
+    /// Options that can also be applied to already admitted downloads after a settings change.
+    public func requestOptions(for job: DownloadJob, settings: AppSettings) throws -> [String: JSONValue] {
+        try settings.validateNetworkPolicy()
+        let request = job.request
+        // aria2 applies one connection limit to every source of a mirrored job.
+        // Choosing the strictest matching rule respects every supplied server.
+        let caps = request.urls.compactMap(URL.init(string:)).compactMap { settings.connectionLimit(for: $0) }
+        let connections = min(request.connections, caps.min() ?? request.connections)
+        let explicitAgent = request.headers.first { $0.key.lowercased() == "user-agent" }?.value
+        let configuredAgent = settings.userAgent?.trimmingCharacters(in: .whitespaces)
+        let agent = explicitAgent ?? (configuredAgent?.isEmpty == false ? configuredAgent! : defaultUserAgent)
+        return [
+            "split": .string(String(connections)), "max-connection-per-server": .string(String(connections)),
+            "all-proxy": .string(settings.proxy), "user-agent": .string(agent)
+        ]
+    }
+
     public func add(_ job: DownloadJob, settings: AppSettings) async throws -> String {
         let r = job.request
-        var options: [String:JSONValue] = [
-            "dir":.string(job.directory),"out":.string(job.filename),"pause":.string("true"),
-            "split":.string(String(r.connections)),"max-connection-per-server":.string(String(r.connections)),
-            "max-download-limit":.string(String(r.speedLimit)),"all-proxy":.string(settings.proxy),
-            "header":.array(r.headers.filter{$0.key.lowercased() != "cookie"}.sorted(by:{$0.key<$1.key}).map{.string($0.key+": "+$0.value)})
-        ]
+        var options = try requestOptions(for: job, settings: settings)
+        options["dir"] = .string(job.directory)
+        options["out"] = .string(job.filename)
+        options["pause"] = .string("true")
+        options["max-download-limit"] = .string(String(r.speedLimit))
+        options["header"] = .array(r.headers.filter { !["cookie", "user-agent"].contains($0.key.lowercased()) }.sorted(by: { $0.key < $1.key }).map { .string($0.key + ": " + $0.value) })
         if let checksum = r.checksum, !checksum.isEmpty { options["checksum"] = .string(checksum.lowercased()); options["check-integrity"] = .string("true") }
         // URL userinfo is origin-scoped by aria2's redirect resolver. Per-job
         // http-user/http-passwd options would be sent to redirected hosts too.

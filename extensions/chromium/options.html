@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Current capture settings</title><link rel="stylesheet" href="popup.css"><link rel="stylesheet" href="options.css"></head>
+<body>
+  <header><img src="icons/icon48.png" width="36" height="36" alt=""><div><h1>Browser capture settings</h1><p id="capture-state" role="status">Loading settings…</p></div></header>
+  <main>
+    <p class="intro">Choose which browser downloads Current takes over. Explicit downloads from the popup, page buttons, and context menus remain available.</p>
+    <p class="tip">Hold <kbd>Alt</kbd> (⌥ Option on Mac) while clicking a link to keep that download in the browser.</p>
+    <div id="settings-error" class="error" role="alert" hidden></div>
+    <form id="settings-form">
+      <div class="field"><label for="file-types">File types to capture</label><p id="file-types-help">Extensions separated by spaces, commas, or new lines: zip, mp4, tar.gz. Leave empty to capture all file types.</p><textarea id="file-types" rows="3" maxlength="6500" spellcheck="false" autocapitalize="off" aria-describedby="file-types-help" placeholder="zip, mp4, pdf"></textarea></div>
+      <div class="field"><label for="excluded-domains">Excluded domains</label><p id="excluded-domains-help">One hostname per line. <code>example.com</code> excludes that exact host. <code>*.example.com</code> excludes that host and all its subdomains.</p><textarea id="excluded-domains" rows="4" maxlength="25600" spellcheck="false" autocapitalize="off" aria-describedby="excluded-domains-help" placeholder="example.com&#10;*.example.org"></textarea></div>
+      <div class="field"><label for="excluded-url-patterns">Excluded URL patterns</label><p id="excluded-url-patterns-help">One full HTTP or HTTPS URL per line. <code>*</code> matches any characters; other characters match literally. For example, <code>https://example.com/private/*</code>.</p><textarea id="excluded-url-patterns" rows="4" maxlength="102500" spellcheck="false" autocapitalize="off" aria-describedby="excluded-url-patterns-help" placeholder="https://example.com/private/*"></textarea></div>
+      <p class="limits">Up to 100 entries per field. Extensions: 32 characters; domains: 253 characters; URL patterns: 1,024 characters. Rules check both the original and final download URL.</p>
+      <div class="save-row"><button id="save-settings" type="submit" class="primary" disabled>Save capture rules</button><span id="settings-feedback" role="status" aria-live="polite"></span></div>
+    </form>
+  </main>
+  <footer><a href="help.html">Setup &amp; browser support</a><span>Settings are saved in this browser.</span></footer>
+  <script src="options.mjs" type="module"></script>
+</body>
+</html>

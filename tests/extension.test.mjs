@@ -209,8 +209,8 @@ function event(beforeEmit = () => {}) {
   const listeners = [];
   return {addListener:fn => listeners.push(fn), emit:(...args) => { beforeEmit(...args); return listeners.map(fn => fn(...args)); }, listeners};
 }
-async function backgroundHarness({flavor = 'firefox', native = async message => ({ok:true, result:message.action === 'status' ? {jobs:[]} : [{id:'job-1'}]})} = {}) {
-  const local = {}, session = {}, notifications = [], downloadEvents = [], cookies = [], nativeMessages = [], badges = [];
+async function backgroundHarness({flavor = 'firefox', saved = {}, userAgent = 'CurrentBrowser/125.0 fixture', now = () => Date.now(), native = async message => ({ok:true, result:message.action === 'status' ? {jobs:[]} : [{id:'job-1'}]})} = {}) {
+  const local = {...saved}, session = {}, notifications = [], downloadEvents = [], cookies = [], nativeMessages = [], badges = [];
   const downloadItems = new Map();
   const store = data => ({
     get:async keys => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter(key => key in data).map(key => [key, data[key]])),
@@ -246,7 +246,7 @@ async function backgroundHarness({flavor = 'firefox', native = async message => 
     }
   }
   const globals = flavor === 'chromium' ? {chrome:browser} : {browser};
-  const context = vm.createContext({...globals, URL, setTimeout, clearTimeout, console});
+  const context = vm.createContext({...globals, navigator:{userAgent}, Date:class extends Date { static now() { return now(); } }, URL, setTimeout, clearTimeout, console});
   vm.runInContext(await readFile(new URL(`../extensions/${flavor}/background.js`, import.meta.url), 'utf8'), context);
   await new Promise(resolve => setImmediate(resolve));
   const message = (value, sender = {id:browser.runtime.id, url:browser.runtime.getURL('popup.html')}) => new Promise(resolve => browser.runtime.onMessage.emit(value, sender, resolve));
@@ -486,4 +486,289 @@ for (const flavor of ['chromium', 'firefox']) {
       assert.equal(h.nativeMessages.length, 0);
     });
   }
+}
+
+
+const emptyCapturePolicy = {fileTypes:[], excludedDomains:[], excludedURLPatterns:[]};
+const clone = value => JSON.parse(JSON.stringify(value));
+function createDownload(h, {id, url, filename, finalUrl, tabId = 1, method = 'GET'}) {
+  h.browser.webRequest.onBeforeRequest.emit({url, method, tabId});
+  if (finalUrl && finalUrl !== url) h.browser.webRequest.onBeforeRequest.emit({url:finalUrl, method:'GET', tabId});
+  h.browser.downloads.onCreated.emit({id, url, finalUrl, filename, state:'in_progress', paused:false});
+}
+
+for (const flavor of ['chromium', 'firefox']) {
+  test(`${flavor} captures included filename types while skipped types never reach cookies or native`, async () => {
+    const h = await backgroundHarness({flavor});
+    const response = await h.message({action:'set-capture-policy', policy:{...emptyCapturePolicy, fileTypes:['.ZIP', 'tar.gz']}});
+    assert.equal(response.ok, true);
+    assert.deepEqual(clone(response.policy.fileTypes), ['zip', 'tar.gz']);
+    await h.message({action:'set-capture', enabled:true});
+    createDownload(h, {id:40, url:'https://example.com/export?id=1', filename:'/Downloads/archive.ZIP'});
+    createDownload(h, {id:41, url:'https://example.com/archive.tar.gz?token=1'});
+    createDownload(h, {id:42, url:'https://example.com/picture.png'});
+    createDownload(h, {id:43, url:'https://example.com/untyped'});
+    await h.settle();
+    assert.deepEqual(h.downloadEvents, ['pause:40', 'pause:41', 'cancel:40', 'cancel:41']);
+    assert.deepEqual(clone(h.cookies), [{url:'https://example.com/export?id=1'}, {url:'https://example.com/archive.tar.gz?token=1'}]);
+    assert.equal(h.nativeMessages.length, 2);
+    assert.equal(h.nativeMessages[0].requests[0].headers['User-Agent'], 'CurrentBrowser/125.0 fixture');
+    assert.deepEqual(h.unhandledErrors, []);
+  });
+
+  test(`${flavor} exclusions match exact hosts, label-bounded subdomains, and whole URL wildcards`, async () => {
+    const h = await backgroundHarness({flavor});
+    assert.equal((await h.message({action:'set-capture-policy', policy:{...emptyCapturePolicy, excludedDomains:['exact.example.com', '*.blocked.example.com'], excludedURLPatterns:['https://files.example.com/private/*?token=*', 'https://files.example.com/literal[1].zip']}})).ok, true);
+    await h.message({action:'set-capture', enabled:true});
+    const cases = [
+      ['https://exact.example.com/a.zip', false],
+      ['https://sub.exact.example.com/a.zip', true],
+      ['https://blocked.example.com/a.zip', false],
+      ['https://sub.blocked.example.com/a.zip', false],
+      ['https://evilblocked.example.com/a.zip', true],
+      ['https://files.example.com/private/a.zip?token=one', false],
+      ['https://files.example.com/private/a.zip?other=one', true],
+      ['https://files.example.com/literal[1].zip', false],
+      ['https://files.example.com/literal1.zip', true],
+      ['https://files.example.com/prefix/private/a.zip?token=one', true]
+    ];
+    for (const [index, [url]] of cases.entries()) createDownload(h, {id:50 + index, url});
+    createDownload(h, {id:70, url:'https://blocked.example.com/start', finalUrl:'https://files.example.com/final.zip'});
+    createDownload(h, {id:71, url:'https://files.example.com/start', finalUrl:'https://sub.blocked.example.com/final.zip'});
+    await h.settle();
+    assert.deepEqual(h.downloadEvents.filter(value => value.startsWith('pause:')), ['pause:51', 'pause:54', 'pause:56', 'pause:58', 'pause:59']);
+    assert.equal(h.nativeMessages.length, 5);
+  });
+
+  test(`${flavor} persisted capture rules survive a worker restart and empty types retain capture-all`, async () => {
+    const first = await backgroundHarness({flavor});
+    await first.message({action:'set-capture', enabled:true});
+    assert.equal((await first.message({action:'set-capture-policy', policy:{...emptyCapturePolicy, excludedDomains:['blocked.example.com']}})).ok, true);
+    const h = await backgroundHarness({flavor, saved:clone(first.local)});
+    const settings = await h.message({action:'get-capture-policy'});
+    assert.equal(settings.captureEnabled, true);
+    assert.deepEqual(clone(settings.policy), {...emptyCapturePolicy, excludedDomains:['blocked.example.com']});
+    assert.deepEqual(h.nativeMessages, [], 'opening settings does not call native status');
+    createDownload(h, {id:72, url:'https://allowed.example.com/no-extension'});
+    createDownload(h, {id:73, url:'https://blocked.example.com/file.zip'});
+    await h.settle();
+    assert.deepEqual(h.downloadEvents, ['pause:72', 'cancel:72']);
+  });
+
+  test(`${flavor} malformed or oversized settings are rejected visibly without replacing saved policy`, async () => {
+    const h = await backgroundHarness({flavor});
+    assert.equal((await h.message({action:'set-capture-policy', policy:emptyCapturePolicy})).ok, true);
+    const invalid = [null, {}, {...emptyCapturePolicy, fileTypes:'zip'}, {...emptyCapturePolicy, fileTypes:['']}, {...emptyCapturePolicy, fileTypes:['zip/exe']}, {...emptyCapturePolicy, fileTypes:['a'.repeat(65)]}, {...emptyCapturePolicy, fileTypes:Array(101).fill('zip')}, {...emptyCapturePolicy, excludedDomains:['https://example.com']}, {...emptyCapturePolicy, excludedDomains:['*example.com']}, {...emptyCapturePolicy, excludedDomains:['a..example.com']}, {...emptyCapturePolicy, excludedURLPatterns:['file:///tmp/*']}, {...emptyCapturePolicy, excludedURLPatterns:['https://example.com/#']}, {...emptyCapturePolicy, excludedURLPatterns:['https://bad..example.com/*']}, {...emptyCapturePolicy, excludedURLPatterns:Array(101).fill('https://example.com/*')}, {...emptyCapturePolicy, excludedDomains:Array(101).fill('example.com')}, {...emptyCapturePolicy, excludedURLPatterns:['https://user:pass@example.com/*']}, {...emptyCapturePolicy, excludedURLPatterns:['https://example.com/' + 'a'.repeat(1025)]}, {...emptyCapturePolicy, excludedURLPatterns:['https://example.com/*\n']}, {...emptyCapturePolicy, unexpected:true}];
+    for (const policy of invalid) {
+      const result = await h.message({action:'set-capture-policy', policy});
+      assert.equal(result.ok, false, JSON.stringify(policy));
+      assert.match(result.error, /policy|rule|extension|domain|pattern|file|type|setting/i);
+      assert.deepEqual(clone(h.local.capturePolicy), emptyCapturePolicy);
+    }
+    assert.ok(h.local.lastError);
+    assert.ok(h.notifications.length);
+    assert.deepEqual(h.nativeMessages, []);
+    assert.equal((await h.message({action:'set-capture', enabled:'true'})).ok, false);
+    assert.equal(h.local.captureEnabled, undefined);
+  });
+
+  test(`${flavor} invalid persisted settings leave automatic capture off until valid settings are saved`, async () => {
+    const h = await backgroundHarness({flavor, saved:{captureEnabled:true, capturePolicy:{...emptyCapturePolicy, excludedDomains:['bad/domain']}}});
+    await h.settle();
+    createDownload(h, {id:74, url:'https://example.com/file.zip'});
+    await h.settle();
+    assert.deepEqual(h.downloadEvents, []);
+    assert.ok(h.local.lastError);
+    const settings = await h.message({action:'get-capture-policy'});
+    assert.equal(settings.ok, false, 'malformed stored rules must not silently become default rules');
+    assert.equal((await h.message({action:'set-capture-policy', policy:emptyCapturePolicy})).ok, true);
+    createDownload(h, {id:75, url:'https://example.com/file.zip'});
+    await h.settle();
+    assert.deepEqual(h.downloadEvents, ['pause:75', 'cancel:75']);
+  });
+
+  test(`${flavor} settings sender checks cannot be forged by page messages or lookalike extension URLs`, async () => {
+    const h = await backgroundHarness({flavor});
+    const root = h.browser.runtime.getURL('');
+    const senders = [
+      {id:h.browser.runtime.id, tab:{id:80}, url:'https://example.com/page'},
+      {id:'other-extension', url:root + 'options.html'},
+      {id:h.browser.runtime.id, url:root.slice(0, -1) + '.attacker.invalid/options.html'},
+      {id:h.browser.runtime.id, url:'https://example.com/?source=' + root},
+      {id:h.browser.runtime.id}
+    ];
+    for (const sender of senders) for (const action of ['get-capture-policy', 'set-capture-policy']) {
+      assert.equal((await h.message({action, policy:emptyCapturePolicy}, sender)).ok, false);
+    }
+    const optionsSender = {id:h.browser.runtime.id, tab:{id:80}, url:root + 'options.html'};
+    assert.equal((await h.message({action:'set-capture-policy', policy:emptyCapturePolicy}, optionsSender)).ok, true);
+    assert.deepEqual(h.nativeMessages, []);
+  });
+
+  test(`${flavor} explicit popup, content media, and context-menu adds bypass automatic exclusions`, async () => {
+    const h = await backgroundHarness({flavor});
+    assert.equal((await h.message({action:'set-capture-policy', policy:{...emptyCapturePolicy, fileTypes:['zip'], excludedDomains:['example.com']}})).ok, true);
+    await h.message({action:'set-capture', enabled:true});
+    const url = 'https://example.com/movie.mp4';
+    createDownload(h, {id:81, url});
+    await h.settle();
+    assert.deepEqual(h.downloadEvents, []);
+    assert.equal((await h.message({action:'add', urls:[url]})).ok, true);
+    assert.equal((await h.message({action:'add', urls:[url]}, {id:h.browser.runtime.id, tab:{id:1}, url:'https://example.com/page'})).ok, true);
+    h.browser.contextMenus.onClicked.emit({menuItemId:'current-link', linkUrl:url, pageUrl:'https://example.com/page'}, {id:1});
+    await h.settle();
+    assert.equal(h.nativeMessages.filter(value => value.action === 'add').length, 3);
+    assert.ok(h.nativeMessages.every(value => value.requests[0].headers['User-Agent'] === 'CurrentBrowser/125.0 fixture'));
+  });
+
+  test(`${flavor} policies still wait for a late positive GET and reject an overlapping POST`, async () => {
+    const h = await backgroundHarness({flavor});
+    assert.equal((await h.message({action:'set-capture-policy', policy:{...emptyCapturePolicy, fileTypes:['zip']}})).ok, true);
+    await h.message({action:'set-capture', enabled:true});
+    h.browser.downloads.onCreated.emit({id:82, url:'https://example.com/late.zip', state:'in_progress', paused:false});
+    await h.settle();
+    h.browser.webRequest.onBeforeRequest.emit({url:'https://example.com/late.zip', method:'GET', tabId:1});
+    await new Promise(resolve => setTimeout(resolve, 60));
+    await h.settle();
+    assert.deepEqual(h.downloadEvents, ['pause:82', 'cancel:82']);
+    createDownload(h, {id:83, url:'https://example.com/unsafe.zip', method:'POST'});
+    h.browser.webRequest.onBeforeRequest.emit({url:'https://example.com/unsafe.zip', method:'GET', tabId:1});
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    await h.settle();
+    assert.deepEqual(h.downloadEvents, ['pause:82', 'cancel:82']);
+  });
+
+  test(`${flavor} Alt bypass is confined to its sender tab and survives late GET and redirects`, async () => {
+    const h = await backgroundHarness({flavor});
+    await h.message({action:'set-capture', enabled:true});
+    const sender = {id:h.browser.runtime.id, tab:{id:4}, frameId:0, url:'https://example.com/page'};
+    assert.equal((await h.message({action:'bypass-capture', url:'https://example.com/alt.zip', tabId:999}, sender)).ok, true);
+    h.browser.downloads.onCreated.emit({id:84, url:'https://example.com/alt.zip', finalUrl:'https://cdn.example.com/alt.zip', state:'in_progress', paused:false});
+    await h.settle();
+    h.browser.webRequest.onBeforeRequest.emit({url:'https://example.com/alt.zip', method:'GET', tabId:4});
+    h.browser.webRequest.onBeforeRequest.emit({url:'https://cdn.example.com/alt.zip', method:'GET', tabId:4});
+    await new Promise(resolve => setTimeout(resolve, 60));
+    await h.settle();
+    assert.deepEqual(h.downloadEvents, []);
+    createDownload(h, {id:85, url:'https://example.com/alt.zip', tabId:5});
+    createDownload(h, {id:86, url:'https://example.com/normal.zip', tabId:4});
+    createDownload(h, {id:87, url:'https://example.com/alt.zip', tabId:999});
+    await h.settle();
+    assert.deepEqual(h.downloadEvents, ['pause:85', 'pause:86', 'pause:87', 'cancel:85', 'cancel:86', 'cancel:87']);
+    for (const [request, source] of [
+      [{action:'bypass-capture', url:'https://example.com/normal.zip'}, {id:'attacker', tab:{id:4}, url:'https://example.com/page'}],
+      [{action:'bypass-capture', url:'file:///tmp/test'}, sender],
+      [{action:'bypass-capture', url:'https://example.com/normal.zip'}, {id:h.browser.runtime.id, url:h.browser.runtime.getURL('popup.html')}]
+    ]) assert.equal((await h.message(request, source)).ok, false);
+  });
+}
+
+// The DOM/event dispatcher is the browser boundary. Synthetic events use the same
+// handler as trusted events, with the read-only isTrusted bit supplied by this fake.
+async function contentClickHarness(flavor) {
+  const messages = [], handlers = new Map();
+  const runtime = {onMessage:event(), sendMessage:(message, callback) => { messages.push(clone(message)); if (flavor === 'chromium') callback({ok:true}); else return Promise.resolve({ok:true}); }};
+  const document = {baseURI:'https://example.com/page', title:'Fixture', documentElement:{}, querySelectorAll:() => [], addEventListener:(name, fn) => { handlers.set(name, fn); }};
+  const globals = flavor === 'firefox' ? {browser:{runtime}} : {chrome:{runtime}};
+  const context = vm.createContext({...globals, document, window:{addEventListener:() => {}}, URL, MutationObserver:class {observe() {}}, setTimeout:() => {}, innerWidth:1000, innerHeight:800, CurrentCore:{resolveMediaURL:(value, base) => { try { return normalizeURL(new URL(value, base).href, true); } catch { return null; } }}});
+  vm.runInContext(await readFile(new URL(`../extensions/${flavor}/content.js`, import.meta.url), 'utf8'), context);
+  const click = values => { for (const name of ['pointerdown', 'mousedown', 'click', 'auxclick']) handlers.get(name)?.({isTrusted:true, altKey:true, button:0, target:{closest:() => ({href:'https://example.com/alt.zip'})}, ...values}); };
+  return {messages, click};
+}
+for (const flavor of ['chromium', 'firefox']) {
+  test(`${flavor} content Alt bypass requires a trusted primary Alt-click on a network anchor`, async () => {
+    const h = await contentClickHarness(flavor);
+    h.click({isTrusted:false});
+    h.click({altKey:false});
+    h.click({button:2});
+    h.click({target:{closest:() => null}});
+    h.click({target:{closest:() => ({href:'javascript:alert(1)'})}});
+    assert.deepEqual(h.messages, []);
+    h.click({});
+    assert.ok(h.messages.length >= 1);
+    assert.ok(h.messages.every(value => value.action === 'bypass-capture' && value.url === 'https://example.com/alt.zip'));
+  });
+}
+
+
+for (const flavor of ['chromium', 'firefox']) {
+  test(`${flavor} policy changes while cookies are pending stop capture before the browser is paused`, async () => {
+    const h = await backgroundHarness({flavor});
+    let releaseCookies;
+    if (flavor === 'chromium') h.browser.cookies.getAll = (options, callback) => { releaseCookies = () => callback([]); };
+    else h.browser.cookies.getAll = async () => new Promise(resolve => { releaseCookies = () => resolve([]); });
+    await h.message({action:'set-capture', enabled:true});
+    createDownload(h, {id:90, url:'https://example.com/recheck.zip'});
+    await h.settle();
+    assert.equal(typeof releaseCookies, 'function');
+    assert.equal((await h.message({action:'set-capture-policy', policy:{...emptyCapturePolicy, excludedDomains:['example.com']}})).ok, true);
+    releaseCookies();
+    await h.settle();
+    assert.deepEqual(h.downloadEvents, []);
+    assert.deepEqual(h.nativeMessages, []);
+  });
+
+  test(`${flavor} Alt bypass expires and closed tabs discard their markers`, async () => {
+    let current = 1000;
+    const h = await backgroundHarness({flavor, now:() => current});
+    await h.message({action:'set-capture', enabled:true});
+    const sender = {id:h.browser.runtime.id, tab:{id:4}, url:'https://example.com/page'};
+    await h.message({action:'bypass-capture', url:'https://example.com/expiring.zip'}, sender);
+    createDownload(h, {id:91, url:'https://example.com/expiring.zip', tabId:4});
+    await h.settle();
+    assert.deepEqual(h.downloadEvents, []);
+    current = 11001;
+    createDownload(h, {id:92, url:'https://example.com/expiring.zip', tabId:4});
+    await h.settle();
+    assert.deepEqual(h.downloadEvents, ['pause:92', 'cancel:92']);
+    await h.message({action:'bypass-capture', url:'https://example.com/closed.zip'}, sender);
+    h.browser.tabs.onRemoved.emit(4);
+    await h.settle();
+    createDownload(h, {id:93, url:'https://example.com/closed.zip', tabId:4});
+    await h.settle();
+    assert.deepEqual(h.downloadEvents, ['pause:92', 'cancel:92', 'pause:93', 'cancel:93']);
+  });
+
+  test(`${flavor} bounded bypass markers cannot grow indefinitely`, async () => {
+    const h = await backgroundHarness({flavor});
+    await h.message({action:'set-capture', enabled:true});
+    const sender = {id:h.browser.runtime.id, tab:{id:4}, url:'https://example.com/page'};
+    for (let index = 0; index < 101; index++) assert.equal((await h.message({action:'bypass-capture', url:`https://example.com/bounded-${index}.zip`}, sender)).ok, true);
+    createDownload(h, {id:94, url:'https://example.com/bounded-0.zip', tabId:4});
+    createDownload(h, {id:95, url:'https://example.com/bounded-100.zip', tabId:4});
+    await h.settle();
+    assert.deepEqual(h.downloadEvents, ['pause:94', 'cancel:94']);
+  });
+
+  test(`${flavor} page-supplied User-Agent values never replace the browser identity`, async () => {
+    const h = await backgroundHarness({flavor});
+    const sender = {id:h.browser.runtime.id, tab:{id:4}, url:'https://example.com/page'};
+    assert.equal((await h.message({action:'add', urls:['https://example.com/file'], userAgent:'ForgedAgent', headers:{'User-Agent':'ForgedAgent'}}, sender)).ok, true);
+    assert.equal(h.nativeMessages[0].requests[0].headers['User-Agent'], 'CurrentBrowser/125.0 fixture');
+  });
+
+  test(`${flavor} wildcard patterns cannot match URL prefixes outside their whole-URL scope`, async () => {
+    const h = await backgroundHarness({flavor});
+    assert.equal((await h.message({action:'set-capture-policy', policy:{...emptyCapturePolicy, excludedURLPatterns:['https://example.com/a*b*c.zip']}})).ok, true);
+    await h.message({action:'set-capture', enabled:true});
+    createDownload(h, {id:96, url:'https://example.com/ab-middle-c.zip'});
+    createDownload(h, {id:97, url:'https://example.com/ab-middle-c.zip?download=1'});
+    createDownload(h, {id:98, url:'https://example.com/a-c-b.zip'});
+    await h.settle();
+    assert.deepEqual(h.downloadEvents, ['pause:97', 'pause:98', 'cancel:97', 'cancel:98']);
+  });
+}
+
+
+for (const flavor of ['chromium', 'firefox']) {
+  test(`${flavor} a successful explicit download cannot hide invalid saved capture rules`, async () => {
+    const h = await backgroundHarness({flavor, saved:{captureEnabled:true, capturePolicy:{...emptyCapturePolicy, excludedDomains:['bad/domain']}}});
+    await h.settle();
+    assert.equal((await h.message({action:'add', urls:['https://example.com/manual.zip']})).ok, true);
+    assert.match(h.local.lastError, /invalid saved capture policy/i);
+    await h.message({action:'clear-error'});
+    assert.match((await h.message({action:'snapshot'})).lastError, /invalid saved capture policy/i);
+    assert.equal((await h.message({action:'set-capture-policy', policy:emptyCapturePolicy})).ok, true);
+    assert.equal(h.local.lastError, undefined);
+  });
 }

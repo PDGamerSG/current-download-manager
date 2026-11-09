@@ -32,6 +32,13 @@ struct DownloadInspector: View {
                         source(job)
                         Divider()
                         organization(job)
+                        Divider()
+                        DownloadNotesEditor(model: model, job: job).id(job.id)
+                        if job.status == .complete, job.request.kind == .file, job.request.urls.count == 1,
+                           let url = URL(string: job.request.urls[0]), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+                            Divider()
+                            updates(job)
+                        }
                         if let scan = job.scanResult, !scan.isEmpty {
                             Divider()
                             VStack(alignment: .leading, spacing: 6) {
@@ -191,6 +198,51 @@ struct DownloadInspector: View {
         .font(.caption)
     }
 
+    private func updates(_ job: DownloadJob) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("File updates").font(.headline)
+            Text("Verified updates use new filenames. Earlier versions stay in their folders.")
+                .font(.caption).foregroundColor(.secondary)
+            if let info = job.synchronization {
+                metadata("Status", info.paused ? "Paused" : info.status.capitalized)
+                if let date = info.checkedAt { metadata("Last checked", date.formatted(date: .abbreviated, time: .shortened)) }
+                if let date = info.nextCheckAt, !info.paused { metadata("Next check", date.formatted(date: .abbreviated, time: .shortened)) }
+                if info.pendingJobID != nil {
+                    metadata("Update received", Display.bytes(info.receivedBytes))
+                    if info.totalBytes > 0 { ProgressView(value: min(1, Double(info.receivedBytes) / Double(info.totalBytes))) }
+                }
+                if let error = info.lastError { Text(error).font(.caption).foregroundColor(.red).textSelection(.enabled) }
+                if !info.versions.isEmpty {
+                    DisclosureGroup("Previous versions (\(info.versions.count))") {
+                        ForEach(Array(info.versions.reversed().prefix(10))) { version in
+                            Button {
+                                NSWorkspace.shared.activateFileViewerSelecting([version.fileURL])
+                            } label: {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(version.filename).lineLimit(2)
+                                    Text(version.savedAt.formatted(date: .abbreviated, time: .shortened)).foregroundColor(.secondary)
+                                }
+                                .font(.caption)
+                            }
+                            .buttonStyle(.borderless).help("Show this version in Finder")
+                        }
+                    }
+                    .font(.callout)
+                }
+            }
+            HStack {
+                Button(job.synchronization?.paused == true ? "Resume updates" : "Check for update") {
+                    model.perform("synchronize", ids: [], extra: ["id": .string(job.id)])
+                }
+                .disabled(job.synchronization?.paused != true && ["checking", "downloading"].contains(job.synchronization?.status ?? ""))
+                if let info = job.synchronization, !info.paused {
+                    Button("Pause updates") { model.perform("synchronization-pause", ids: [], extra: ["id": .string(job.id)]) }
+                }
+            }
+            .font(.callout)
+        }
+    }
+
     private func refresh(_ job: DownloadJob) {
         refreshing = true
         refreshError = nil
@@ -207,5 +259,37 @@ struct DownloadInspector: View {
         refreshURL = ""
         refreshError = nil
         refreshExpanded = false
+    }
+}
+
+private struct DownloadNotesEditor: View {
+    @ObservedObject var model: AppModel
+    let job: DownloadJob
+    @ViewState<String> private var draft: String
+    @ViewState<Bool> private var saving = false
+    @ViewState<String?> private var error: String?
+    init(model: AppModel, job: DownloadJob) {
+        self.model = model; self.job = job
+        _draft = SwiftUI.State(initialValue: job.description ?? "")
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Description").font(.headline)
+            TextEditor(text: $draft)
+                .font(.callout).frame(minHeight: 65, maxHeight: 120)
+                .accessibilityLabel("Download description")
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.2)))
+            if let error { Text(error).font(.caption).foregroundColor(.red) }
+            Button(saving ? "Saving…" : "Save description") {
+                saving = true; error = nil
+                Task {
+                    defer { saving = false }
+                    do { try await model.send("annotate", ["id": .string(job.id), "description": .string(draft)]) }
+                    catch { self.error = error.localizedDescription }
+                }
+            }
+            .disabled(saving || draft == (job.description ?? ""))
+            .font(.callout)
+        }
     }
 }

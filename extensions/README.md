@@ -70,9 +70,21 @@ Current waits up to one second for positive GET evidence without pausing that
 transfer. It then checks that the browser download is still active and unpaused
 before attempting capture; missing or unsafe evidence leaves it in the browser.
 
+## Capture settings
+
+Open **Capture settings** from the popup. Settings are private to that browser's extension installation:
+
+- **File types:** one suffix per line, for example `zip`, `.mp4`, or `tar.gz`. An empty list captures all otherwise eligible types. Matching uses the browser's filename, then the final URL if no filename is available.
+- **Excluded domains:** exact hostnames or `*.example.org` to exclude the base domain and subdomains.
+- **Excluded URL patterns:** full HTTP(S) URLs with `*` wildcards. The entire address must match; both original and final download addresses are considered.
+
+Hold **Alt/Option** while clicking a download link to leave that transfer in the browser. Only a real primary mouse click creates a bypass marker, scoped to the tab and URL for ten seconds. Explicit popup/context-menu downloads are still allowed for excluded URLs. Rules are bounded and validated; invalid saved policy blocks capture and shows an error until corrected. These rules do not change manual native downloads or media discovery.
+
 ## Cookies, privacy and supported media
 
 For every requested HTTP/HTTPS resource, `cookies.getAll({url})` retrieves destination-scoped cookies. The extension checks cookie domain, host-only flag, path and Secure scope again before building that URL's `Cookie` header. It never reads the popup's cookies and never attaches one URL's cookie header to a batch of unrelated URLs. Page referers follow the usual strict-origin-when-cross-origin shape; extension/internal page URLs and HTTPS-to-HTTP referers are omitted. The native app stores sensitive request headers privately and excludes them from browser status responses.
+
+The background also sends the browser's own User-Agent so servers can select the same resource representation. Website scripts cannot supply a replacement User-Agent or edit the privileged capture policy.
 
 The extension runs on normal HTTP/HTTPS pages, including frames, and requests broad host permission for media discovery and explicit browser integration. It cannot inspect browser-protected pages, and private browsing is disabled. Firefox containers and partitioned-cookie sessions are not claimed as verified; unusual cookie stores or authentication flows may require using the original browser. The extension does not scrape browser passwords or promise replay of POST bodies.
 

@@ -10,7 +10,7 @@ Current is an original open source application inspired by IDM's publicly docume
 
 Download the app and extension archives from [Releases](https://github.com/PDGamerSG/current-download-manager/releases).
 
-The prebuilt **0.1.1 app requires Apple silicon and macOS 27 or later** because its bundled Homebrew libraries were built for that OS. Intel and older macOS releases are not verified. The Swift package targets macOS 13 for source builds with compatible dependencies.
+The prebuilt **0.2.0 app requires Apple silicon and macOS 27 or later** because its bundled Homebrew libraries were built for that OS. Intel and older macOS releases are not verified. The Swift package targets macOS 13 for source builds with compatible dependencies.
 
 1. Extract the macOS ZIP and move **Current.app** into `/Applications` or `~/Applications`.
 2. Open Current. This release is ad hoc signed, without Developer ID signing or Apple notarization. If macOS blocks it, review the source/release and use **System Settings → Privacy & Security → Open Anyway**.
@@ -24,14 +24,19 @@ The app includes aria2, yt-dlp, FFmpeg and their required libraries. Node, Pytho
 
 - Multi-connection HTTP/HTTPS, FTP and SFTP transfers; pause/resume, retry, crash recovery, mirror URLs and checksums.
 - Batch input, history, refresh an expired URL, safe filenames, categories/folders, Finder actions, and redacted JSON import/export.
-- Queue concurrency, priority, one-time/daily schedules, per-job/global bandwidth limits and an hourly quota. The app or CLI service must remain running for scheduled work.
+- Queue concurrency, priority, one-time/weekday schedules, periodic HTTP file updates, per-job/global bandwidth limits and configurable quota windows. The app or CLI service must remain running for scheduled work.
 - Basic credentials, destination-scoped browser cookies/referer and a file-transfer proxy. Private per-user state, authenticated loopback control, quarantine and an optional scanner executable.
 - Direct media files, clear HLS/DASH and websites supported by yt-dlp; separate audio/video merging with FFmpeg.
-- Bounded same-origin website link discovery with preview before adding files.
-- Chrome/Firefox popup, context menus, selected/page links, media discovery and opt-in browser download capture. A browser transfer is cancelled only after Current acknowledges acceptance.
+- Bounded same-origin website link discovery with preview, plus saved offline HTML/CSS/resource projects with schedules, repeat captures and relative-link rewriting.
+- Chrome/Firefox popup, context menus, selected/page links, media discovery and opt-in browser download capture. Capture rules support file types, domain/URL exceptions and trusted Alt-click bypass. A browser transfer is cancelled only after Current acknowledges acceptance.
+- Custom category destinations, per-server connection caps, browser/manual User-Agent settings and editable download descriptions.
 - Native macOS sidebar, inspector, search, keyboard shortcuts, drag/drop, opt-in clipboard offers and completion notifications.
 
-[Feature and compatibility matrix](docs/FEATURES.md) distinguishes tested behavior, limitations and missing IDM features. DRM, Safari, POST-body replay and a full offline website mirror are outside this release.
+[Feature and compatibility matrix](docs/FEATURES.md) and the [sourced IDM functionality audit](docs/reference/idm-functionality.md) distinguish tested behavior, limitations and missing features. Offline projects capture static content from one origin; they do not render JavaScript applications. DRM, Safari and POST-body replay are outside this release.
+
+File synchronization saves each verified version under a new filename and points the library row to it. Earlier files remain. The first check downloads to establish validators; later checks use ETag/Last-Modified when available. Website projects likewise retain earlier snapshots. Their independent resource/time bounds are separate from queue proxy, bandwidth and quotas. Review and remove old output folders when no longer needed.
+
+[Workflow instructions](docs/WORKFLOWS.md) cover file updates, offline projects, capture settings and the new organization/network controls.
 
 ## Build and test
 
@@ -57,7 +62,7 @@ python3 -m venv .artifacts/test-env
 .artifacts/test-env/bin/pip install -r requirements-test.txt
 npm ci
 npx playwright install chromium firefox
-PATH="$PWD/.artifacts/test-env/bin:$PATH" scripts/test.sh --protocols --browsers
+CURRENT_BROWSER_HEADLESS=1 PATH="$PWD/.artifacts/test-env/bin:$PATH" scripts/test.sh --protocols --browsers
 ```
 
 These tests use temporary state and local servers, independently verify downloaded bytes, and restore native messaging manifests. Do not run the two browser suites concurrently. [Testing details and recorded evidence](docs/TESTING.md) describe the verification boundaries.

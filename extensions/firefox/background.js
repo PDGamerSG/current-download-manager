@@ -36,11 +36,12 @@ function cookieHeader(rawURL, cookies) {
     .map(cookie => `${cookie.name}=${cookie.value}`).join('; ');
 }
 
-async function requestForURL(rawURL, {pageURL, getCookies, filename, kind = 'file'} = {}) {
+async function requestForURL(rawURL, {pageURL, getCookies, filename, kind = 'file', userAgent} = {}) {
   const url = normalizeURL(rawURL);
   if (!url) throw new Error('Use a valid HTTP, HTTPS, FTP or SFTP URL without embedded credentials.');
   const headers = {};
   if (normalizeURL(url, true)) {
+    if (typeof userAgent === 'string' && userAgent.length > 0 && userAgent.length <= 1024 && !CONTROLS.test(userAgent)) headers['User-Agent'] = userAgent;
     const cookies = getCookies ? await getCookies({url}) : [];
     const cookie = cookieHeader(url, cookies);
     if (cookie) headers.Cookie = cookie;
@@ -135,7 +136,83 @@ function captureObservation(download, records, now = Date.now()) {
   return records.get(final);
 }
 
-return {normalizeURL, normalizeURLs, cookieHeader, requestForURL, detectMedia, mergeMedia, acceptedJobs, handoffBrowserDownload, resolveMediaURL, observeRequest, captureObservation};
+
+// Policy values come only from private extension storage and privileged pages.
+// A malformed stored policy fails closed in the worker instead of capturing all.
+function validateCapturePolicy(value) {
+  const keys = ['fileTypes', 'excludedDomains', 'excludedURLPatterns'];
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length || Object.keys(value).some(key => !keys.includes(key))) throw new Error('Capture policy must contain file types, excluded domains, and URL patterns.');
+  function rules(key, maxLength, normalize) {
+    const items = value[key];
+    if (!Array.isArray(items) || items.length > 100) throw new Error(`Capture policy ${key} must contain at most 100 rules.`);
+    return [...new Set(items.map(item => {
+      if (typeof item !== 'string' || !item.trim() || item.length > maxLength || CONTROLS.test(item)) throw new Error(`Invalid ${key} rule; use at most ${maxLength} characters per rule.`);
+      return normalize(item.trim());
+    }))];
+  }
+  const fileTypes = rules('fileTypes', 64, item => {
+    const extension = item.replace(/^\./, '').toLowerCase();
+    if (extension.length > 32 || !/^[a-z0-9][a-z0-9_-]*(\.[a-z0-9][a-z0-9_-]*)*$/.test(extension)) throw new Error('File type rules must be extensions such as zip, mp4, or tar.gz.');
+    return extension;
+  });
+  const excludedDomains = rules('excludedDomains', 255, item => {
+    const subdomains = item.startsWith('*.');
+    const host = (subdomains ? item.slice(2) : item).toLowerCase().replace(/\.$/, '');
+    let valid = false;
+    try {
+      const parsed = new URL(`https://${host}/`);
+      valid = host.length <= 253 && parsed.hostname === host && !parsed.port && (
+        /^\[[0-9a-f:]+\]$/.test(host) || host.split('.').every(label => label.length > 0 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label))
+      );
+    } catch { /* Report the invalid domain below. */ }
+    if (!valid) throw new Error('Domain rules must be hostnames such as example.com or *.example.com, without a scheme, path, or port.');
+    return `${subdomains ? '*.' : ''}${host}`;
+  });
+  const excludedURLPatterns = rules('excludedURLPatterns', 1024, item => {
+    let parsed;
+    try { parsed = new URL(item); } catch { throw new Error('URL patterns must start with http:// or https://.'); }
+    if (!/^https?:\/\//i.test(item) || !WEB_SCHEMES.has(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password || item.includes('#') || /[\s\\]/.test(item)) throw new Error('URL patterns must be full HTTP or HTTPS URLs without credentials, fragments, or whitespace. Use * as a wildcard.');
+    const host = parsed.hostname.replace(/\.$/, '');
+    if (host.length > 253 || (!/^\[[0-9a-f:]+\]$/.test(host) && !host.split('.').every(label => label.length > 0 && label.length <= 63 && /^[a-z0-9*](?:[a-z0-9*-]*[a-z0-9*])?$/.test(label)))) throw new Error('Invalid URL pattern hostname.');
+    return parsed.href;
+  });
+  return {fileTypes, excludedDomains, excludedURLPatterns};
+}
+
+// Only * is special. Ordered literal searches avoid executable regular
+// expressions and regex backtracking, including for patterns containing [ or ?.
+function capturePatternMatches(url, pattern) {
+  const parts = pattern.split('*');
+  if (parts.length === 1) return url === pattern;
+  if (!url.startsWith(parts[0]) || !url.endsWith(parts[parts.length - 1])) return false;
+  let cursor = parts[0].length;
+  const end = url.length - parts[parts.length - 1].length;
+  for (const part of parts.slice(1, -1)) {
+    const found = url.indexOf(part, cursor);
+    if (found < 0 || found + part.length > end) return false;
+    cursor = found + part.length;
+  }
+  return cursor <= end;
+}
+
+function automaticCaptureAllowed(download, policy) {
+  const original = normalizeURL(download.url, true);
+  const final = normalizeURL(download.finalUrl || download.url, true);
+  // The browser retains unusually long links; policy matching work stays bounded.
+  if (!original || !final || original.length > 16384 || final.length > 16384) return false;
+  for (const url of [original, final]) {
+    const host = new URL(url).hostname.toLowerCase().replace(/\.$/, '');
+    if (policy.excludedDomains.some(rule => rule.startsWith('*.') ? host === rule.slice(2) || host.endsWith(`.${rule.slice(2)}`) : host === rule)) return false;
+    if (policy.excludedURLPatterns.some(pattern => capturePatternMatches(url, pattern))) return false;
+  }
+  if (!policy.fileTypes.length) return true;
+  let name = typeof download.filename === 'string' && download.filename ? download.filename.split(/[\\/]/).pop() : new URL(final).pathname.split('/').pop();
+  try { name = decodeURIComponent(name); } catch { /* Keep invalid encoding literal. */ }
+  name = name.toLowerCase();
+  return policy.fileTypes.some(extension => name.endsWith(`.${extension}`));
+}
+
+return {normalizeURL, normalizeURLs, cookieHeader, requestForURL, detectMedia, mergeMedia, acceptedJobs, handoffBrowserDownload, resolveMediaURL, observeRequest, captureObservation, validateCapturePolicy, automaticCaptureAllowed};
 })();
 globalThis.CurrentAPI = (() => {
 /* Chrome callbacks must consume runtime.lastError inside their callback. */
@@ -175,18 +252,29 @@ return {api, isFirefox, callAPI, nativeMessage};
 })();
 /* Bundled after core.mjs and api.mjs by build.mjs; classic syntax works in Firefox MV2 and Chromium workers. */
 (() => {
-  const {normalizeURL, normalizeURLs, requestForURL, detectMedia, mergeMedia, acceptedJobs, handoffBrowserDownload, observeRequest, captureObservation} = globalThis.CurrentCore;
+  const {normalizeURL, normalizeURLs, requestForURL, detectMedia, mergeMedia, acceptedJobs, handoffBrowserDownload, observeRequest, captureObservation, validateCapturePolicy, automaticCaptureAllowed} = globalThis.CurrentCore;
   const {api, callAPI, nativeMessage} = globalThis.CurrentAPI;
   const action = api.action || api.browserAction;
   const recentRequests = new Map();
   const inHandoff = new Set();
   const media = new Map();
+  const bypasses = new Map();
   const sessionStore = api.storage.session || null;
   let mutation = Promise.resolve();
   let captureEnabled = false;
   let lastFailure = '';
+  let capturePolicy = {fileTypes:[], excludedDomains:[], excludedURLPatterns:[]};
+  let policyError = '';
+  const userAgent = globalThis.navigator?.userAgent;
   const ready = Promise.all([
-    callAPI(api.storage.local, 'get', ['captureEnabled', 'lastError']).then(value => { captureEnabled = value.captureEnabled === true; if (value.lastError) { lastFailure = value.lastError; badge('!'); } }),
+    callAPI(api.storage.local, 'get', ['captureEnabled', 'capturePolicy', 'lastError']).then(async value => {
+      captureEnabled = value.captureEnabled === true;
+      if (value.lastError) { lastFailure = value.lastError; badge('!'); }
+      try {
+        if (value.captureEnabled !== undefined && typeof value.captureEnabled !== 'boolean') throw new Error('Saved capture setting must be enabled or disabled.');
+        if (value.capturePolicy !== undefined) capturePolicy = validateCapturePolicy(value.capturePolicy);
+      } catch (error) { policyError = `Invalid saved capture policy: ${error.message}`; await report(policyError); }
+    }),
     sessionStore ? callAPI(sessionStore, 'get', 'tabMedia').then(value => { for (const [tab, entries] of Object.entries(value.tabMedia || {})) media.set(Number(tab), entries.slice(0, 60)); }) : Promise.resolve()
   ]);
 
@@ -209,6 +297,7 @@ return {api, isFirefox, callAPI, nativeMessage};
     }).catch(() => {});
   }
   async function clearError() {
+    if (policyError) { await report(policyError); return; }
     await callAPI(api.storage.local, 'remove', 'lastError');
     lastFailure = '';
     badge('');
@@ -254,12 +343,32 @@ return {api, isFirefox, callAPI, nativeMessage};
     if (entry) rememberMedia(details.tabId, [{...entry, pageURL:details.documentUrl || details.originUrl || details.initiator || ''}]).catch(report);
   }, {urls:['http://*/*', 'https://*/*']}, ['responseHeaders']);
 
+  function pruneBypasses(now = Date.now()) {
+    for (const [key, marker] of bypasses) if (marker.expires <= now || bypasses.size > 100) bypasses.delete(key);
+  }
+  function rememberBypass(tabId, url) {
+    const key = `${tabId}\n${url}`;
+    bypasses.delete(key);
+    bypasses.set(key, {tabId, expires:Date.now() + 10000});
+    pruneBypasses();
+  }
+  function captureAllowed(download) {
+    if (!captureEnabled || policyError || !automaticCaptureAllowed(download, capturePolicy)) return false;
+    pruneBypasses();
+    for (const value of [download.url, download.finalUrl || download.url]) {
+      const url = normalizeURL(value, true);
+      const tabId = recentRequests.get(url)?.tabId;
+      if (bypasses.has(`${tabId}\n${url}`)) return false;
+    }
+    return true;
+  }
+
   async function addURLs(urls, {pageURL, filename, kind = 'file', tabId} = {}) {
     const normalized = normalizeURLs(urls, 101);
     if (!normalized.length) throw new Error('No downloadable network links were found. Blob and data URLs stay in the browser.');
     if (normalized.length > 100) throw new Error('Choose at most 100 links at a time.');
     const requests = await Promise.all(normalized.map(url => requestForURL(url, {
-      pageURL, filename:normalized.length === 1 ? filename : undefined, kind,
+      pageURL, filename:normalized.length === 1 ? filename : undefined, kind, userAgent,
       getCookies:options => callAPI(api.cookies, 'getAll', options)
     })));
     const response = await nativeMessage({action:'add', requests});
@@ -270,7 +379,7 @@ return {api, isFirefox, callAPI, nativeMessage};
   api.downloads.onCreated.addListener(download => {
     (async () => {
       await ready;
-      if (!captureEnabled || inHandoff.has(download.id)) return;
+      if (!captureAllowed(download) || inHandoff.has(download.id)) return;
       let url = normalizeURL(download.finalUrl || download.url, true);
       if (!url || !normalizeURL(download.url, true) || download.state !== 'in_progress' || download.paused) return;
       inHandoff.add(download.id);
@@ -294,13 +403,13 @@ return {api, isFirefox, callAPI, nativeMessage};
           record = captureObservation(download, recentRequests);
         }
         // Unknown or unsafe request methods always remain in the browser.
-        if (!record || !captureEnabled) return;
+        if (!record || !captureAllowed(download)) return;
         const pageURL = download.referrer || record.pageURL;
         const request = await requestForURL(url, {
-          pageURL, filename:download.filename?.split(/[\\/]/).pop(),
+          pageURL, filename:download.filename?.split(/[\\/]/).pop(), userAgent,
           getCookies:options => callAPI(api.cookies, 'getAll', options)
         });
-        if (!captureEnabled || !captureObservation(download, recentRequests)) return;
+        if (!captureAllowed(download) || !captureObservation(download, recentRequests)) return;
         const result = await handoffBrowserDownload(download, record, request, {
           pause:id => callAPI(api.downloads, 'pause', id),
           resume:id => callAPI(api.downloads, 'resume', id),
@@ -336,7 +445,10 @@ return {api, isFirefox, callAPI, nativeMessage};
       return addURLs(result.urls || [], {pageURL:info.pageUrl || tab?.url});
     })().catch(report);
   });
-  api.tabs.onRemoved.addListener(tabId => { clearTab(tabId).catch(report); });
+  api.tabs.onRemoved.addListener(tabId => {
+    for (const [key, marker] of bypasses) if (marker.tabId === tabId) bypasses.delete(key);
+    clearTab(tabId).catch(report);
+  });
   api.tabs.onUpdated.addListener((tabId, change) => {
     if (change.status === 'loading' || change.url) clearTab(tabId).catch(report);
   });
@@ -345,9 +457,30 @@ return {api, isFirefox, callAPI, nativeMessage};
     await ready;
     if (sender.id !== api.runtime.id || !message || typeof message.action !== 'string') throw new Error('Unrecognized extension request.');
     const extensionPage = typeof sender.url === 'string' && sender.url.startsWith(api.runtime.getURL(''));
-    const contentPage = !extensionPage && Boolean(sender.tab && normalizeURL(sender.url, true));
+    const contentPage = !extensionPage && Boolean(Number.isInteger(sender.tab?.id) && sender.tab.id >= 0 && normalizeURL(sender.url, true));
     if (!extensionPage && !contentPage) throw new Error('Unrecognized extension source.');
     switch (message.action) {
+      case 'bypass-capture': {
+        const url = normalizeURL(message.url, true);
+        if (!contentPage || !url || url.length > 16384) throw new Error('Capture bypass must come from a network link in its browser tab.');
+        // The isolated content script checks the browser-owned isTrusted bit.
+        // Ignore any supplied tab ID, settings, or native command fields.
+        rememberBypass(sender.tab.id, url);
+        return {ok:true};
+      }
+      case 'get-capture-policy':
+        if (!extensionPage) throw new Error('Open Current capture settings to view the policy.');
+        if (policyError) throw new Error(policyError);
+        return {ok:true, captureEnabled, policy:capturePolicy};
+      case 'set-capture-policy': {
+        if (!extensionPage) throw new Error('Change capture policy from Current settings.');
+        const policy = validateCapturePolicy(message.policy);
+        await callAPI(api.storage.local, 'set', {capturePolicy:policy});
+        capturePolicy = policy;
+        policyError = '';
+        await clearError();
+        return {ok:true, captureEnabled, policy:capturePolicy};
+      }
       case 'discover-media':
         if (!contentPage || !Array.isArray(message.entries)) throw new Error('Media must come from a page.');
         await rememberMedia(sender.tab.id, message.entries.map(entry => ({...entry, pageURL:sender.url})));
@@ -367,8 +500,9 @@ return {api, isFirefox, callAPI, nativeMessage};
       }
       case 'set-capture':
         if (!extensionPage) throw new Error('Change capture from the toolbar popup.');
-        captureEnabled = message.enabled === true;
-        await callAPI(api.storage.local, 'set', {captureEnabled});
+        if (typeof message.enabled !== 'boolean') throw new Error('Capture setting must be enabled or disabled.');
+        await callAPI(api.storage.local, 'set', {captureEnabled:message.enabled});
+        captureEnabled = message.enabled;
         return {ok:true, captureEnabled};
       case 'clear-error':
         if (!extensionPage) throw new Error('Open the toolbar popup.');

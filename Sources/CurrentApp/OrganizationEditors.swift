@@ -10,6 +10,9 @@ struct QueueEditor: View {
     @ViewState<Date> private var start: Date
     @ViewState<Bool> private var hasEnd: Bool
     @ViewState<Date> private var end: Date
+    @ViewState<Set<Int>> private var weekdays: Set<Int>
+    @ViewState<Bool> private var synchronizing: Bool
+    @ViewState<Int> private var synchronizationMinutes: Int
     @ViewState<Bool> private var saving = false
     @ViewState<String?> private var errorMessage: String?
     @ViewState<Bool> private var confirmDelete = false
@@ -22,6 +25,9 @@ struct QueueEditor: View {
         _start = SwiftUI.State(initialValue: queue.schedule?.start ?? Date())
         _hasEnd = SwiftUI.State(initialValue: queue.schedule?.end != nil)
         _end = SwiftUI.State(initialValue: queue.schedule?.end ?? Date().addingTimeInterval(3600))
+        _weekdays = SwiftUI.State(initialValue: Set(queue.schedule?.weekdays ?? Array(1...7)))
+        _synchronizing = SwiftUI.State(initialValue: queue.synchronizationIntervalSeconds != nil)
+        _synchronizationMinutes = SwiftUI.State(initialValue: max(1, (queue.synchronizationIntervalSeconds ?? 3600) / 60))
     }
 
     var body: some View {
@@ -36,16 +42,37 @@ struct QueueEditor: View {
                 Section("Schedule") {
                     Toggle("Use a scheduled window", isOn: $scheduled)
                     if scheduled {
-                        Toggle("Repeat daily", isOn: $daily)
+                        Toggle("Repeat on selected days", isOn: $daily)
+                        if daily {
+                            HStack {
+                                ForEach(1...7, id: \.self) { day in
+                                    Toggle(Calendar.current.shortWeekdaySymbols[day - 1], isOn: Binding(get: { weekdays.contains(day) }, set: { selected in
+                                        if selected { weekdays.insert(day) } else { weekdays.remove(day) }
+                                    }))
+                                    .toggleStyle(.button)
+                                }
+                            }
+                            .accessibilityLabel("Days when the scheduled window starts")
+                        }
                         DatePicker(daily ? "First start" : "Start", selection: $start, displayedComponents: [.date, .hourAndMinute])
                         Toggle("Stop at an end time", isOn: $hasEnd)
                         if hasEnd {
                             DatePicker("End", selection: $end, displayedComponents: daily ? [.hourAndMinute] : [.date, .hourAndMinute])
                         }
-                        Text(daily ? "The window repeats each day from the first start. An end time earlier than the start runs overnight." : "This queue becomes eligible at the start time and stops admitting transfers at its end time.")
+                        Text(daily ? "The window repeats on the selected days from the first start. Overnight windows belong to the day they start." : "This queue becomes eligible at the start time and stops admitting transfers at its end time.")
                             .font(.caption).foregroundColor(.secondary)
                     }
                     Text("Current must be running. A download you pause manually stays paused when its schedule opens.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                Section("File updates") {
+                    Toggle("Periodically check completed files", isOn: $synchronizing)
+                    if synchronizing {
+                        Stepper("Check every \(synchronizationMinutes) minutes", value: $synchronizationMinutes, in: 1...525600)
+                    }
+                    Text("Checks files with one HTTP or HTTPS source while this queue is eligible. Each verified update is saved as a new version; earlier files are kept. The first check downloads a version to establish server validators.")
+                        .font(.caption).foregroundColor(.secondary)
+                    Text("Servers without usable validators, and transfers through a configured proxy, may download a version on every check.")
                         .font(.caption).foregroundColor(.secondary)
                 }
                 if let errorMessage { InlineError(message: errorMessage) }
@@ -64,7 +91,7 @@ struct QueueEditor: View {
             }
             .padding(16)
         }
-        .frame(width: 570, height: 570)
+        .frame(width: 620, height: 700)
         .confirmationDialog("Delete this queue?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete queue", role: .destructive) { delete() }
         } message: { Text("Downloads in this queue will move to the main queue.") }
@@ -86,6 +113,9 @@ struct QueueEditor: View {
                     if normalizedEnd <= start { normalizedEnd = calendar.date(byAdding: .day, value: 1, to: normalizedEnd) ?? normalizedEnd.addingTimeInterval(86_400) }
                 }
                 queue.schedule = scheduled ? QueueSchedule(start: start, end: hasEnd ? normalizedEnd : nil, daily: daily) : nil
+                if scheduled && daily { queue.schedule?.weekdays = weekdays.sorted() }
+                queue.synchronizationIntervalSeconds = synchronizing ? synchronizationMinutes * 60 : nil
+                try queue.validate()
                 try await model.send("queue-save", ["queue": try .from(queue)])
                 dismiss()
             } catch { errorMessage = error.localizedDescription }
@@ -97,82 +127,6 @@ struct QueueEditor: View {
             do {
                 try await model.send("queue-delete", ["id": .string(queue.id)])
                 if model.location == .queue(queue.id) { model.location = .queue("main") }
-                dismiss()
-            } catch { errorMessage = error.localizedDescription }
-        }
-    }
-}
-
-struct CategoryEditor: View {
-    @ObservedObject var model: AppModel
-    @Environment(\.dismiss) private var dismiss
-    @ViewState<CurrentCore.Category> private var category: CurrentCore.Category
-    @ViewState<String> private var extensions: String
-    @ViewState<String> private var hosts: String
-    @ViewState<Bool> private var saving = false
-    @ViewState<String?> private var errorMessage: String?
-    @ViewState<Bool> private var confirmDelete = false
-
-    init(model: AppModel, category: CurrentCore.Category) {
-        self.model = model
-        _category = SwiftUI.State(initialValue: category)
-        _extensions = SwiftUI.State(initialValue: category.extensions.joined(separator: ", "))
-        _hosts = SwiftUI.State(initialValue: category.hosts.joined(separator: ", "))
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            SheetHeading(title: model.state.categories.contains(where: { $0.id == category.id }) ? "Edit category" : "New category", subtitle: "Group matching downloads and give them a folder of their own.", symbol: "folder")
-            Form {
-                TextField("Name", text: $category.name)
-                TextField("File extensions", text: $extensions, prompt: Text("pdf, epub, txt"))
-                Text("Separate extensions with commas. Omit the leading dot.").font(.caption).foregroundColor(.secondary)
-                TextField("Source domains", text: $hosts, prompt: Text("example.com, downloads.example.org"))
-                Text("Domain rules include subdomains. A file matches when either its extension or domain matches.")
-                    .font(.caption).foregroundColor(.secondary)
-                if category.id == "other" { Text("Other is the fallback category for files that do not match a rule.").font(.caption).foregroundColor(.secondary) }
-                if let errorMessage { InlineError(message: errorMessage) }
-            }
-            .formStyle(.grouped)
-            Divider()
-            HStack {
-                if category.id != "other", model.state.categories.contains(where: { $0.id == category.id }) {
-                    Button("Delete category…", role: .destructive) { confirmDelete = true }
-                }
-                Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button(saving ? "Saving…" : "Save category") { save() }
-                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
-                    .disabled(saving || category.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-            .padding(16)
-        }
-        .frame(width: 570, height: 440)
-        .confirmationDialog("Delete this category?", isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button("Delete category", role: .destructive) { delete() }
-        } message: { Text("Existing downloads will stay in their current folders.") }
-    }
-
-    private func save() {
-        saving = true
-        errorMessage = nil
-        Task {
-            defer { saving = false }
-            do {
-                category.name = category.name.trimmingCharacters(in: .whitespacesAndNewlines)
-                category.extensions = Input.list(extensions).map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ".")) }.filter { !$0.isEmpty }
-                category.hosts = Input.list(hosts)
-                try await model.send("category-save", ["category": try .from(category)])
-                dismiss()
-            } catch { errorMessage = error.localizedDescription }
-        }
-    }
-
-    private func delete() {
-        Task {
-            do {
-                try await model.send("category-delete", ["id": .string(category.id)])
-                if model.location == .category(category.id) { model.location = .all }
                 dismiss()
             } catch { errorMessage = error.localizedDescription }
         }

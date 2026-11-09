@@ -3,6 +3,7 @@ import Foundation
 public actor DownloadService {
     private let store: StateStore
     private let engine: Aria2Engine
+    private let websiteProjects: WebsiteProjectManager
     private var state: AppState
     private var loop: Task<Void,Never>?
     private var locked = false
@@ -15,26 +16,40 @@ public actor DownloadService {
     private var media: [String:ActiveMedia] = [:]
     private var engineSpeedLimit: Int64?
     private var previousBytes: [String:Int64] = [:]
+    private struct UpdateCheck { let generation: String; let task: Task<Void,Never> }
+    private var updateChecks: [String:UpdateCheck] = [:]
     public private(set) var engineError: String?
-    public init(store: StateStore) throws { self.store = store; state = try store.load(); engine = Aria2Engine(store:store) }
-    public func snapshot() -> AppState { state }
+    public init(store: StateStore) throws { self.store = store; state = try store.load(); engine = Aria2Engine(store:store); websiteProjects = try WebsiteProjectManager(stateDirectory: store.directory) }
+    public func snapshot() -> AppState { visibleState() }
+    private func visibleState() -> AppState {
+        var visible = state
+        visible.jobs.removeAll { $0.synchronizationParentID != nil }
+        return visible
+    }
     private func acquire() async {
         if !locked { locked = true; return }
         await withCheckedContinuation { waiters.append($0) }
     }
     private func release() { if waiters.isEmpty { locked = false } else { waiters.removeFirst().resume() } }
     public func start() async throws {
+        guard loop == nil, !stopping else { return }
         _ = try state.settings.validated()
+        for queue in state.queues { try queue.validate() }
         loadedCookies = try TransferSafety.cookieJar(state.jobs)
         try await engine.start(settings:state.settings,cookieJar:loadedCookies)
         for i in state.jobs.indices {
             state.jobs[i].gid = nil; state.jobs[i].bytesPerSecond = 0; state.jobs[i].connections = 0
             if ![.complete,.error,.cancelled].contains(state.jobs[i].status) { state.jobs[i].status = state.jobs[i].intent == .paused ? .paused : .waiting }
             previousBytes[state.jobs[i].id] = state.jobs[i].completedBytes
+            if state.jobs[i].synchronization?.status == "checking" {
+                state.jobs[i].synchronization?.status = "idle"
+                state.jobs[i].synchronization?.nextCheckAt = Date()
+            }
         }
         try store.save(state)
         for job in state.jobs where job.needsVerification == true && job.intent != .cancelled && job.status != .complete { beginFinalization(job) }
         try await tick()
+        try await websiteProjects.start()
         loop = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds:400_000_000)
@@ -46,6 +61,10 @@ public actor DownloadService {
     private func recordEngineError(_ message: String) { engineError = message }
     public func stop() async {
         stopping = true; loop?.cancel(); loop = nil
+        let checks = updateChecks.values.map(\.task); updateChecks.removeAll()
+        checks.forEach { $0.cancel() }
+        await websiteProjects.stop()
+        for task in checks { await task.value }
         await acquire(); defer { release() }
         for task in finalizationTasks.values { task.cancel() }; finalizationTasks.removeAll(); finalizing.removeAll()
         for id in Array(media.keys) { _ = try? await cancelMedia(id) }
@@ -54,8 +73,12 @@ public actor DownloadService {
     }
     public func command(_ input: JSONValue) async throws -> JSONValue {
         let action = input["action"].string
-        if action == "status" { return try .from(state) }
-        if action == "export" { return try .from(state.jobs.map{ $0.request.redacted }) }
+        if action == "status" { return try .from(visibleState()) }
+        if action == "export" { return try .from(state.jobs.filter { $0.synchronizationParentID == nil }.map{ $0.request.redacted }) }
+        if action.hasPrefix("web-project-") {
+            guard !stopping else { throw CurrentError.invalid("Current is shutting down.") }
+            return try await websiteProjects.command(input)
+        }
         if action == "grab" {
             guard input.object["depth"] == nil || input["depth"].integer != nil else { throw CurrentError.invalid("Crawl depth must be a whole number.") }
             return try await .from(SiteGrabber.preview(url:input["url"].string,depth:input["depth"].int,extensions:input["extensions"].array.map{$0.string}))
@@ -95,9 +118,11 @@ public actor DownloadService {
             result = try .from(jobs.compactMap { job in state.jobs.first(where:{$0.id == job.id}) })
         case "pause", "resume", "cancel", "retry", "remove", "delete-file", "priority", "move", "refresh":
             let ids = input.object["ids"]?.array.map{$0.string} ?? [input["id"].string]
-            guard !ids.isEmpty, ids.allSatisfy({ id in state.jobs.contains(where:{$0.id == id}) }) else { throw CurrentError.invalid("Select an existing download.") }
+            guard !ids.isEmpty, ids.allSatisfy({ id in state.jobs.contains(where:{$0.id == id && $0.synchronizationParentID == nil}) }) else { throw CurrentError.invalid("Select an existing download.") }
             if action == "move" { guard state.queues.contains(where:{$0.id == input["queueID"].string}) else { throw CurrentError.invalid("Choose an existing queue.") } }
             for id in ids {
+                let updatesWerePaused = state.jobs.first(where: { $0.id == id })?.synchronization?.paused ?? false
+                if ["cancel", "remove", "delete-file", "move"].contains(action) { try await stopUpdate(id, discard: true) }
                 guard let index = state.jobs.firstIndex(where:{$0.id == id}) else { continue }
                 switch action {
                 case "pause":
@@ -145,7 +170,11 @@ public actor DownloadService {
                 case "priority":
                     guard let priority = input["priority"].integer else { throw CurrentError.invalid("Priority must be a whole number.") }
                     state.jobs[index].priority = max(-100,min(100,priority))
-                case "move": state.jobs[index].request.queueID = input["queueID"].string
+                case "move":
+                    state.jobs[index].request.queueID = input["queueID"].string
+                    state.jobs[index].synchronization?.paused = updatesWerePaused
+                    state.jobs[index].synchronization?.status = updatesWerePaused ? "paused" : "idle"
+                    state.jobs[index].synchronization?.nextCheckAt = updatesWerePaused ? nil : Date()
                 default: break
                 }
             }
@@ -156,15 +185,21 @@ public actor DownloadService {
             let settings = try JSONValue.object(merged).decode(AppSettings.self).validated()
             _ = try await engine.call("changeGlobalOption",[.object(["max-concurrent-downloads":.string(String(settings.maxConcurrent))])])
             for job in state.jobs where job.gid != nil && ![.complete,.error,.cancelled].contains(job.status) {
-                _ = try await engine.call("changeOption",[.string(job.gid!),.object(["all-proxy":.string(settings.proxy)])])
+                _ = try await engine.call("changeOption",[.string(job.gid!),.object(try engine.requestOptions(for:job,settings:settings))])
             }
             state.settings = settings
             try store.save(state); try await reconcile(); result = try .from(settings)
         case "queue-save":
             let queue = try input["queue"].decode(DownloadQueue.self)
-            guard !queue.id.isEmpty, !queue.name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty, (1...32).contains(queue.maxConcurrent) else { throw CurrentError.invalid("Name the queue and choose 1–32 simultaneous downloads.") }
-            if let schedule = queue.schedule, let end = schedule.end, end <= schedule.start { throw CurrentError.invalid("The schedule end must follow its start; use the next day for an overnight window.") }
+            try queue.validate()
+            let previousInterval = state.queues.first { $0.id == queue.id }?.synchronizationIntervalSeconds
             if let index = state.queues.firstIndex(where:{$0.id == queue.id}) { state.queues[index] = queue } else { state.queues.append(queue) }
+            if previousInterval != queue.synchronizationIntervalSeconds {
+                for index in state.jobs.indices where state.jobs[index].request.queueID == queue.id && state.jobs[index].synchronization != nil {
+                    let info = state.jobs[index].synchronization!
+                    state.jobs[index].synchronization?.nextCheckAt = info.paused ? nil : queue.synchronizationIntervalSeconds.map { (info.checkedAt ?? Date()).addingTimeInterval(Double($0)) }
+                }
+            }
             try store.save(state); try await reconcile(); result = try .from(queue)
         case "queue-delete":
             let id = input["id"].string; guard id != "main" else { throw CurrentError.invalid("The main queue cannot be deleted.") }
@@ -173,11 +208,45 @@ public actor DownloadService {
         case "category-save":
             let category = try input["category"].decode(Category.self); try DownloadRequest.validateFilename(category.name)
             guard !category.id.isEmpty else { throw CurrentError.invalid("The category needs an identifier.") }
+            if let directory = category.directory, !directory.isEmpty {
+                guard directory.hasPrefix("/"), !directory.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { throw CurrentError.invalid("Choose an absolute category destination folder without control characters.") }
+            }
             if let i = state.categories.firstIndex(where:{$0.id == category.id}) { state.categories[i] = category } else { state.categories.insert(category,at:0) }
             try store.save(state); result = try .from(category)
         case "category-delete":
             let id = input["id"].string; guard id != "other" else { throw CurrentError.invalid("Keep the Other category for unclassified downloads.") }
             state.categories.removeAll(where:{$0.id == id}); try store.save(state)
+        case "annotate":
+            guard let index = state.jobs.firstIndex(where: { $0.id == input["id"].string && $0.synchronizationParentID == nil }),
+                  case .string(let description) = input["description"], description.utf8.count <= 8192,
+                  !description.unicodeScalars.contains(where: { CharacterSet.controlCharacters.subtracting(.newlines).subtracting(CharacterSet(charactersIn:"\t")).contains($0) }) else {
+                throw CurrentError.invalid("Select a download and enter a description of at most 8192 bytes.")
+            }
+            state.jobs[index].description = description
+            try store.save(state); result = try .from(state.jobs[index])
+        case "synchronize", "synchronization-pause":
+            let id = input["id"].string
+            guard let index = state.jobs.firstIndex(where: { $0.id == id && $0.synchronizationParentID == nil }), state.jobs[index].status == .complete,
+                  SynchronizationProbe.supports(state.jobs[index]) else { throw CurrentError.invalid("Choose a completed file with one HTTP or HTTPS source to check for updates.") }
+            if action == "synchronization-pause" { try await stopUpdate(id, discard: false) }
+            else {
+                guard let queue = state.queues.first(where: { $0.id == state.jobs[index].request.queueID }), queue.isEligible(at: Date()),
+                      !(state.settings.hourlyQuota > 0 && state.quotaBytes >= state.settings.hourlyQuota) else {
+                    throw CurrentError.invalid("Enable this queue within its schedule and available quota before checking for updates.")
+                }
+                state.jobs[index].synchronization = state.jobs[index].synchronization ?? DownloadSynchronization(filename: state.jobs[index].filename)
+                state.jobs[index].synchronization?.paused = false
+                if let pending = state.jobs[index].synchronization?.pendingJobID, let child = state.jobs.firstIndex(where: { $0.id == pending }) {
+                    state.jobs[child].intent = .running
+                    if state.jobs[child].status != .complete { state.jobs[child].status = .waiting }
+                    state.jobs[index].synchronization?.status = "downloading"
+                } else {
+                    guard updateChecks[id] != nil || updateChecks.count < 4 else { throw CurrentError.invalid("Four update checks are already running. Try again when one finishes.") }
+                    beginUpdateCheck(index)
+                }
+                try await reconcile()
+            }
+            try store.save(state); result = try .from(visibleState().jobs.first { $0.id == id })
         default: throw CurrentError.invalid("Unknown command: \(action)")
         }
         return result
@@ -186,7 +255,7 @@ public actor DownloadService {
     private func makeJob(_ request: DownloadRequest, existing: [DownloadJob]) throws -> DownloadJob {
         let url = URL(string:request.urls[0])!
         let category = state.categories.first(where:{$0.id == request.categoryID}) ?? state.categories.first(where:{$0.matches(url)}) ?? Category(id:"other",name:"Other",extensions:[])
-        let directory = request.directory.flatMap{$0.isEmpty ? nil : $0} ?? URL(fileURLWithPath:state.settings.downloadDirectory).appendingPathComponent(category.name).path
+        let directory = request.directory.flatMap{$0.isEmpty ? nil : $0} ?? category.directory.flatMap{$0.isEmpty ? nil : $0} ?? URL(fileURLWithPath:state.settings.downloadDirectory).appendingPathComponent(category.name).path
         try FileManager.default.createDirectory(atPath:directory,withIntermediateDirectories:true)
         var name = request.filename.flatMap{$0.isEmpty ? nil : $0} ?? url.lastPathComponent
         if (try? DownloadRequest.validateFilename(name)) == nil { name = "download-"+String(UUID().uuidString.prefix(8)) }
@@ -215,10 +284,12 @@ public actor DownloadService {
         guard !stopping else { return }
         guard engine.isRunning else { throw CurrentError.invalid("The download engine stopped unexpectedly. Restart Current to recover unfinished downloads.") }
         apply(try await engine.statuses())
-        if Date().timeIntervalSince(state.quotaWindow) >= 3600 { state.quotaWindow = Date(); state.quotaBytes = 0 }
+        if Date().timeIntervalSince(state.quotaWindow) >= Double(state.settings.effectiveQuotaPeriodSeconds) { state.quotaWindow = Date(); state.quotaBytes = 0 }
         for job in state.jobs {
             let before = previousBytes[job.id] ?? 0; state.quotaBytes += max(0,job.completedBytes-before); previousBytes[job.id] = job.completedBytes
         }
+        try await settleUpdates()
+        scheduleUpdateChecks()
         try await reconcile(); try store.save(state); engineError = nil
     }
     private func apply(_ statuses: [String:JSONValue]) {
@@ -292,6 +363,7 @@ public actor DownloadService {
         let job = state.jobs[index], generation = UUID().uuidString
         var effective = job
         effective.request.speedLimit = speedLimit
+        if !effective.request.headers.keys.contains(where: { $0.lowercased() == "user-agent" }), let userAgent = state.settings.userAgent, !userAgent.isEmpty { effective.request.headers["User-Agent"] = userAgent }
         let worker = MediaWorker(job:effective,stateDirectory:store.directory,onProgress:{ [weak self] progress in Task { await self?.updateMedia(job.id,generation:generation,progress:progress) } },onExit:{ [weak self] code,message in Task { await self?.mediaExited(job.id,generation:generation,code:code,message:message) } })
         do { media[job.id] = ActiveMedia(generation:generation,worker:worker,speedLimit:speedLimit); try worker.start(); state.jobs[index].status = .active }
         catch { media[job.id] = nil; state.jobs[index].status = .error; state.jobs[index].error = error.localizedDescription }
@@ -358,8 +430,177 @@ public actor DownloadService {
             state.jobs[index].needsVerification = false
             state.jobs[index].completedAt = Date()
             if let attrs = try? FileManager.default.attributesOfItem(atPath:state.jobs[index].fileURL.path), let size = attrs[.size] as? NSNumber { state.jobs[index].totalBytes = size.int64Value; state.jobs[index].completedBytes = size.int64Value }
+            if state.jobs[index].synchronizationParentID == nil, SynchronizationProbe.supports(state.jobs[index]),
+               let interval = state.queues.first(where: { $0.id == state.jobs[index].request.queueID })?.synchronizationIntervalSeconds {
+                state.jobs[index].synchronization = state.jobs[index].synchronization ?? DownloadSynchronization(filename: state.jobs[index].filename)
+                state.jobs[index].synchronization?.nextCheckAt = Date().addingTimeInterval(Double(interval))
+            }
         }
         try? store.save(state)
+    }
+    private func scheduleUpdateChecks() {
+        guard !stopping, !(state.settings.hourlyQuota > 0 && state.quotaBytes >= state.settings.hourlyQuota) else { return }
+        let now = Date()
+        for index in state.jobs.indices {
+            guard updateChecks.count < 4 else { break }
+            let job = state.jobs[index]
+            guard job.synchronizationParentID == nil, job.status == .complete, SynchronizationProbe.supports(job),
+                  let queue = state.queues.first(where: { $0.id == job.request.queueID }), let interval = queue.synchronizationIntervalSeconds,
+                  queue.isEligible(at: now), job.synchronization?.paused != true, job.synchronization?.pendingJobID == nil, updateChecks[job.id] == nil else { continue }
+            if state.jobs[index].synchronization == nil {
+                state.jobs[index].synchronization = DownloadSynchronization(filename: job.filename)
+                state.jobs[index].synchronization?.nextCheckAt = (job.completedAt ?? now).addingTimeInterval(Double(interval))
+            }
+            if (state.jobs[index].synchronization?.nextCheckAt ?? .distantPast) <= now { beginUpdateCheck(index) }
+        }
+    }
+    private func beginUpdateCheck(_ index: Int) {
+        let id = state.jobs[index].id
+        guard !stopping, updateChecks[id] == nil, state.jobs[index].synchronization?.pendingJobID == nil else { return }
+        state.jobs[index].synchronization = state.jobs[index].synchronization ?? DownloadSynchronization(filename: state.jobs[index].filename)
+        state.jobs[index].synchronization?.status = "checking"
+        state.jobs[index].synchronization?.lastError = nil
+        state.jobs[index].synchronization?.checkCount += 1
+        var job = state.jobs[index]
+        do {
+            let options = try engine.requestOptions(for: job, settings: state.settings)
+            let encoding = job.request.headers.first { $0.key.lowercased() == "accept-encoding" }?.value ?? "identity"
+            job.request.headers = job.request.headers.filter { !["user-agent", "accept-encoding"].contains($0.key.lowercased()) }
+            job.request.headers["User-Agent"] = options["user-agent"]?.string
+            job.request.headers["Accept-Encoding"] = encoding
+        } catch { finishUpdateCheck(index, error: error.localizedDescription); return }
+        let settings = state.settings, generation = UUID().uuidString
+        let task = Task { [weak self] in
+            do {
+                try TransferSafety.verifyOwnership(job)
+                let result = try await SynchronizationProbe.check(job, settings: settings)
+                await self?.updateChecked(id, generation: generation, result: result, error: nil)
+            } catch {
+                await self?.updateChecked(id, generation: generation, result: nil, error: error.localizedDescription)
+            }
+        }
+        updateChecks[id] = UpdateCheck(generation: generation, task: task)
+    }
+    private func finishUpdateCheck(_ index: Int, error: String? = nil) {
+        state.jobs[index].synchronization?.status = error == nil ? "idle" : "error"
+        state.jobs[index].synchronization?.checkedAt = Date()
+        state.jobs[index].synchronization?.lastError = error
+        state.jobs[index].synchronization?.receivedBytes = 0
+        state.jobs[index].synchronization?.totalBytes = 0
+        let interval = state.queues.first { $0.id == state.jobs[index].request.queueID }?.synchronizationIntervalSeconds
+        state.jobs[index].synchronization?.nextCheckAt = interval.map { Date().addingTimeInterval(Double($0)) }
+    }
+    private func updateChecked(_ id: String, generation: String, result: SynchronizationProbeResult?, error: String?) async {
+        await acquire(); defer { release() }
+        guard updateChecks[id]?.generation == generation else { return }; updateChecks[id] = nil
+        guard !stopping, let index = state.jobs.firstIndex(where: { $0.id == id }), state.jobs[index].status == .complete,
+              state.jobs[index].synchronization?.paused != true else { return }
+        guard let queue = state.queues.first(where: { $0.id == state.jobs[index].request.queueID }), queue.isEligible(at: Date()),
+              !(state.settings.hourlyQuota > 0 && state.quotaBytes >= state.settings.hourlyQuota) else {
+            finishUpdateCheck(index); try? store.save(state); return
+        }
+        do {
+            if let error { throw CurrentError.invalid(error) }
+            try TransferSafety.verifyOwnership(state.jobs[index])
+            guard let result else { throw CurrentError.invalid("The update check did not return a result.") }
+            if !result.changed { finishUpdateCheck(index); try store.save(state); return }
+            var request = state.jobs[index].request
+            request.directory = state.jobs[index].directory
+            request.categoryID = state.jobs[index].categoryID
+            request.startPaused = false
+            request.headers = request.headers.filter { !SynchronizationProbe.conditionalHeaders.contains($0.key.lowercased()) }
+            request.headers = request.headers.filter { !["user-agent", "accept-encoding"].contains($0.key.lowercased()) }
+            for (key, value) in result.transferHeaders { request.headers[key] = value }
+            if let etag = result.etag, !etag.lowercased().hasPrefix("w/") { request.headers["If-Match"] = etag }
+            else if let modified = result.lastModified { request.headers["If-Unmodified-Since"] = modified }
+            let base = URL(fileURLWithPath: state.jobs[index].synchronization!.baseFilename)
+            var stem = base.deletingPathExtension().lastPathComponent
+            while stem.utf8.count > 120 { stem.removeLast() }
+            var ext = base.pathExtension
+            while ext.utf8.count > 48 { ext.removeLast() }
+            let suffix = ext.isEmpty ? "" : "." + ext
+            request.filename = stem + " (update " + String(UUID().uuidString.prefix(8)) + ")" + suffix
+            var child = try makeJob(try request.validated(), existing: state.jobs)
+            child.priority = state.jobs[index].priority
+            child.synchronizationParentID = id
+            var candidate = state
+            candidate.jobs[index].synchronization?.pendingJobID = child.id
+            candidate.jobs[index].synchronization?.candidateETag = result.etag
+            candidate.jobs[index].synchronization?.candidateLastModified = result.lastModified
+            candidate.jobs[index].synchronization?.status = "downloading"
+            candidate.jobs.append(child)
+            do { _ = try TransferSafety.cookieJar(candidate.jobs); try store.save(candidate) }
+            catch { TransferSafety.releaseEmptyReservation(child); throw error }
+            state = candidate
+            try await synchronizeCookies(); try await reconcile()
+        } catch {
+            if let current = state.jobs.firstIndex(where: { $0.id == id }) { finishUpdateCheck(current, error: error.localizedDescription) }
+        }
+        try? store.save(state)
+    }
+    private func stopUpdate(_ id: String, discard: Bool) async throws {
+        let check = updateChecks.removeValue(forKey: id); check?.task.cancel()
+        guard let parent = state.jobs.firstIndex(where: { $0.id == id }) else { return }
+        if discard, check == nil, state.jobs[parent].synchronization == nil { return }
+        state.jobs[parent].synchronization = state.jobs[parent].synchronization ?? DownloadSynchronization(filename: state.jobs[parent].filename)
+        state.jobs[parent].synchronization?.paused = true
+        state.jobs[parent].synchronization?.status = "paused"
+        state.jobs[parent].synchronization?.nextCheckAt = nil
+        guard let childID = state.jobs[parent].synchronization?.pendingJobID,
+              let child = state.jobs.firstIndex(where: { $0.id == childID }) else { return }
+        if discard {
+            invalidateFinalization(childID)
+            try await detach(child)
+            // The attempt is retained on disk; only its private queue record is
+            // removed. No update can grant permission to delete a replacement.
+            state.jobs.removeAll { $0.id == childID }; previousBytes[childID] = nil
+            if let current = state.jobs.firstIndex(where: { $0.id == id }) { state.jobs[current].synchronization?.pendingJobID = nil }
+        } else {
+            state.jobs[child].intent = .paused
+            if state.jobs[child].status != .complete { state.jobs[child].status = .paused }
+            state.jobs[child].bytesPerSecond = 0
+            if let gid = state.jobs[child].gid { _ = try? await engine.call("forcePause", [.string(gid)]) }
+        }
+    }
+    private func settleUpdates() async throws {
+        for childID in state.jobs.filter({ $0.synchronizationParentID != nil }).map(\.id) {
+            guard let childIndex = state.jobs.firstIndex(where: { $0.id == childID }) else { continue }
+            let child = state.jobs[childIndex]
+            guard let parent = state.jobs.firstIndex(where: { $0.id == child.synchronizationParentID }),
+                  state.jobs[parent].status == .complete, state.jobs[parent].synchronization?.pendingJobID == childID else {
+                invalidateFinalization(childID); try await detach(childIndex)
+                state.jobs.removeAll { $0.id == childID }; previousBytes[childID] = nil; continue
+            }
+            state.jobs[parent].synchronization?.receivedBytes = child.completedBytes
+            state.jobs[parent].synchronization?.totalBytes = child.totalBytes
+            guard [.complete, .error, .cancelled].contains(child.status) else { continue }
+            if child.status == .complete {
+                guard state.jobs[parent].synchronization?.paused != true,
+                      state.queues.first(where: { $0.id == state.jobs[parent].request.queueID })?.isEligible(at: Date()) == true else { continue }
+            }
+            do {
+                guard child.status == .complete else { throw CurrentError.invalid(child.error ?? "The update was interrupted. The existing version was kept.") }
+                try TransferSafety.verifyOwnership(state.jobs[parent])
+                try TransferSafety.verifyOwnership(child)
+                var info = state.jobs[parent].synchronization!
+                info.versions.append(SynchronizedVersion(job: state.jobs[parent]))
+                info.versions = Array(info.versions.suffix(100))
+                info.etag = info.candidateETag; info.lastModified = info.candidateLastModified
+                state.jobs[parent].filename = child.filename; state.jobs[parent].directory = child.directory
+                state.jobs[parent].fileDevice = child.fileDevice; state.jobs[parent].fileInode = child.fileInode
+                state.jobs[parent].hasStarted = true; state.jobs[parent].needsVerification = false
+                state.jobs[parent].totalBytes = child.totalBytes; state.jobs[parent].completedBytes = child.completedBytes
+                state.jobs[parent].completedAt = child.completedAt; state.jobs[parent].scanResult = child.scanResult
+                state.jobs[parent].gid = nil; state.jobs[parent].synchronization = info
+                previousBytes[state.jobs[parent].id] = child.completedBytes
+                finishUpdateCheck(parent)
+            } catch { finishUpdateCheck(parent, error: error.localizedDescription) }
+            state.jobs[parent].synchronization?.pendingJobID = nil
+            state.jobs[parent].synchronization?.candidateETag = nil
+            state.jobs[parent].synchronization?.candidateLastModified = nil
+            if let gid = child.gid { _ = try? await engine.call("removeDownloadResult", [.string(gid)]) }
+            state.jobs.removeAll { $0.id == childID }; previousBytes[childID] = nil
+        }
     }
     private func synchronizeCookies() async throws {
         let cookies = try TransferSafety.cookieJar(state.jobs)

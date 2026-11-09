@@ -110,7 +110,69 @@ try {
     return new Promise(resolve=>chrome.runtime.sendMessage({action:'snapshot',tabId:target?.id},reply=>resolve(reply?.media?.find(m=>m.url.endsWith('/video.mp4')))));
   }),'page media discovery');
   assert.ok(media.url.endsWith('/video.mp4'));
-  console.log(JSON.stringify({passed:['stable extension identity','real native host connection','popup URL → native host → byte-verified file','opt-in browser takeover → native acceptance → browser cancellation → byte-verified file','HttpOnly cookie and referer handoff → authenticated byte-verified file','page media discovery'],count:6,browser:await browser.browser().version()},null,2));
+  // Exercise the generated options page through ordinary extension-page controls.
+  const [options] = await Promise.all([popup.waitForEvent('popup'), popup.locator('#capture-settings').click()]);
+  await options.locator('#save-settings').waitFor();
+  await until(() => options.locator('#save-settings').isEnabled(), 'capture settings ready');
+  async function savePolicy({fileTypes = [], excludedDomains = [], excludedURLPatterns = []} = {}) {
+    const policy = {fileTypes, excludedDomains, excludedURLPatterns};
+    await options.locator('#file-types').fill(fileTypes.join(', '));
+    await options.locator('#excluded-domains').fill(excludedDomains.join('\n'));
+    await options.locator('#excluded-url-patterns').fill(excludedURLPatterns.join('\n'));
+    await options.locator('#save-settings').click();
+    try {
+      await until(async () => {
+        const saved = await worker.evaluate(async () => (await chrome.storage.local.get('capturePolicy')).capturePolicy);
+        assert.deepEqual(saved, policy);
+        return true;
+      }, 'capture rules persisted');
+    } catch (error) {
+      serviceLog += 'Capture settings diagnostic: ' + JSON.stringify({saved:await worker.evaluate(async () => (await chrome.storage.local.get('capturePolicy')).capturePolicy),expected:policy,body:await options.locator('body').innerText()}) + '\n';
+      throw error;
+    }
+    await options.locator('#settings-feedback').filter({hasText:'Capture rules saved.'}).waitFor();
+    assert.equal(await options.locator('#settings-error').isVisible(), false);
+  }
+  const policyBytes = Buffer.from(Array.from({length:2 * 1024 * 1024}, (_, index) => index & 255));
+  const policyHash = createHash('sha256').update(policyBytes).digest('hex');
+  async function staysInBrowser(selector, path, clickOptions) {
+    await page.bringToFront();
+    const [download] = await Promise.all([page.waitForEvent('download'), page.locator(selector).click(clickOptions)]);
+    const destination = await download.path();
+    assert.equal(await download.failure(), null, `${path} remains a browser download`);
+    assert.equal(createHash('sha256').update(await readFile(destination)).digest('hex'), policyHash);
+    assert.equal((await command('status')).jobs.some(job => job.request.urls[0] === fixtureURL + path), false, `${path} never becomes a native job`);
+  }
+  await savePolicy({fileTypes:['zip']});
+  await staysInBrowser('#policy-type', '/policy-type.bin');
+  await savePolicy({fileTypes:['bin'], excludedDomains:['127.0.0.1']});
+  await staysInBrowser('#policy-domain', '/policy-domain.bin');
+  await savePolicy({fileTypes:['bin'], excludedURLPatterns:[fixtureURL + '/policy-pattern*']});
+  await staysInBrowser('#policy-pattern', '/policy-pattern.bin');
+  await options.locator('#excluded-domains').fill('https://invalid.example/path');
+  await options.locator('#save-settings').click();
+  await options.locator('#settings-error').waitFor({state:'visible'});
+  assert.deepEqual(await worker.evaluate(async () => (await chrome.storage.local.get('capturePolicy')).capturePolicy.excludedDomains), [], 'malformed settings never replace saved rules');
+  await options.locator('#excluded-domains').fill('');
+  await popup.locator('#urls').fill(fixtureURL + '/policy-pattern.bin');
+  await popup.locator('#add-button').click();
+  const explicit = await until(async () => (await command('status')).jobs.find(job => job.request.urls[0] === fixtureURL + '/policy-pattern.bin' && job.status === 'complete'), 'manual excluded URL completes');
+  assert.equal(createHash('sha256').update(await readFile(join(explicit.directory, explicit.filename))).digest('hex'), policyHash);
+  await savePolicy({fileTypes:['bin']});
+  await staysInBrowser('#policy-alt', '/policy-alt.bin', {modifiers:['Alt']});
+  await staysInBrowser('#policy-post', '/policy-post.bin');
+  await page.locator('#policy-allowed').click();
+  const allowed = await until(async () => (await command('status')).jobs.find(job => job.request.urls[0] === fixtureURL + '/policy-allowed.bin' && job.status === 'complete'), 'included browser download completes');
+  assert.equal(createHash('sha256').update(await readFile(join(allowed.directory, allowed.filename))).digest('hex'), policyHash);
+  const userAgent = await page.evaluate(() => navigator.userAgent);
+  assert.equal(allowed.request.headers['User-Agent'], userAgent, 'browser-created native requests carry the real browser User-Agent');
+  const policyRequests = (await (await fetch(fixtureURL + '/stats')).json()).filter(entry => entry.path === '/policy-allowed.bin');
+  assert.ok(policyRequests.length >= 2);
+  assert.ok(policyRequests.every(entry => entry.userAgent === userAgent), 'the fixture observes the browser User-Agent on native network requests');
+  await page.evaluate(() => document.getElementById('policy-synthetic').dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, altKey:true, button:0})));
+  const synthetic = await until(async () => (await command('status')).jobs.find(job => job.request.urls[0] === fixtureURL + '/policy-synthetic.bin' && job.status === 'complete'), 'synthetic Alt click cannot forge bypass');
+  assert.equal(createHash('sha256').update(await readFile(join(synthetic.directory, synthetic.filename))).digest('hex'), policyHash);
+  console.log(JSON.stringify({passed:['stable extension identity','real native host connection','popup URL → native host → byte-verified file','opt-in browser takeover → native acceptance → browser cancellation → byte-verified file','HttpOnly cookie and referer handoff → authenticated byte-verified file','page media discovery','actual options page persists rules and displays validation errors','file-type, exact-domain, and URL-pattern exclusions retain byte-verified browser downloads','manual excluded URL → native byte-verified file','trusted Alt-click bypass retains browser download','POST remains a byte-verified browser download','included GET carries browser User-Agent through native network requests','synthetic Alt-click cannot forge bypass'],count:13,browser:await browser.browser().version()},null,2));
 } catch(error) {
   console.error(serviceLog); throw error;
 } finally {

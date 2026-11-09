@@ -15,3 +15,5 @@ SHA-256: `7346128fab42957b4254eabdb012bfdbd751e9069361e98a6916f26bb03d62ee`.
 Published features include accelerated dynamic segmentation, HTTP/HTTPS/FTP/MMS, recovery/resume, browser takeover and context menus, video panel, scheduled queues and periodic synchronization, categories, site spider, page-wide downloads, interface customization, multilingual UI, updater, hourly quota, antivirus hooks, proxy support, Basic/Negotiate/NTLM/Kerberos authentication, and drag/drop.
 
 These are reference requirements, not evidence that Current implements them all. `docs/FEATURES.md` records actual implementation and verification. Proprietary source, algorithms, assets and extension code were not used.
+
+The follow-up [functionality audit](idm-functionality.md) covers the official usage, options, scheduler/queue and Grabber manuals read on 2026-11-10, including explicit coverage gaps and the 0.2.0 additions.

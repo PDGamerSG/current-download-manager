@@ -15,7 +15,7 @@ def main():
     output.parent.mkdir(exist_ok=True)
     subprocess.run([
         "swiftc", "-parse-as-library",
-        *[str(ROOT / "Sources/CurrentCore" / name) for name in ["Models.swift", "Storage.swift", "SiteGrabber.swift", "MediaWorker.swift"]],
+        *[str(ROOT / "Sources/CurrentCore" / name) for name in ["Models.swift", "NetworkPolicy.swift", "Storage.swift", "SiteGrabber.swift", "MediaWorker.swift"]],
         str(ROOT / "tests/media_grabber_main.swift"), "-o", str(output)
     ], check=True, cwd=ROOT)
     with tempfile.TemporaryDirectory(prefix="current-media-checks-") as folder:

@@ -48,6 +48,25 @@ async function availableLoopbackPort() {
   return port;
 }
 
+async function launchFirefoxWithBrowserDownloads(profile, options) {
+  // Playwright's download interception replaces Firefox's real filename with a
+  // GUID. Filename-filter tests need the ordinary browser download manager.
+  // Its protocol supports this mode, but the public boolean option cannot
+  // express it. Scope the protocol override to this launch and restore it.
+  const channel = firefox._channel;
+  assert.equal(typeof channel?.launchPersistentContext, 'function');
+  firefox._channel = new Proxy(channel, {
+    get(target, property) {
+      if (property === 'launchPersistentContext') {
+        return (params, ...rest) => target.launchPersistentContext({...params, acceptDownloads:'internal-browser-default'}, ...rest);
+      }
+      return Reflect.get(target, property);
+    }
+  });
+  try { return await firefox.launchPersistentContext(profile, options); }
+  finally { firefox._channel = channel; }
+}
+
 // Firefox's supported DevTools add-on actor is the temporary-install mechanism
 // used by web-ext. Permanent unsigned installation is rejected by this build.
 async function installTemporaryAddon(port, addonPath) {
@@ -205,8 +224,9 @@ try {
     'browser.helperApps.neverAsk.saveToDisk':'application/octet-stream'
   };
   await writeFile(join(profile, 'user.js'), Object.entries(preferences).map(([key, value]) => `user_pref(${JSON.stringify(key)}, ${JSON.stringify(value)});`).join('\n') + '\n');
-  context = await firefox.launchPersistentContext(profile, {
-    headless:process.env.CURRENT_BROWSER_HEADLESS !== '0', acceptDownloads:true, env,
+  await mkdir(join(directory, 'browser-downloads'), {recursive:true});
+  context = await launchFirefoxWithBrowserDownloads(profile, {
+    headless:process.env.CURRENT_BROWSER_HEADLESS !== '0', env,
     args:['-start-debugger-server', String(debuggerPort)],
     firefoxUserPrefs:preferences
   });
@@ -228,8 +248,8 @@ try {
 
   await evaluate(`const popup = ${popupExpression}; const capture = popup.document.getElementById("capture"); if (!capture.checked) capture.click(); return true;`);
   await until(() => evaluate('return (await browser.storage.local.get("captureEnabled")).captureEnabled === true;'), 'Firefox capture opt-in persistence');
-  await evaluate('globalThis.__currentDownloads = []; browser.downloads.onCreated.addListener(item => globalThis.__currentDownloads.push({event:"created", id:item.id, state:item.state, url:item.url})); browser.downloads.onChanged.addListener(delta => globalThis.__currentDownloads.push({event:"changed", ...delta})); browser.downloads.onErased.addListener(id => globalThis.__currentDownloads.push({event:"erased", id})); return true;');
-  await evaluate('globalThis.__currentCaptureEvents = []; browser.webRequest.onBeforeRequest.addListener(details => { if (details.url.endsWith("/slow.bin")) globalThis.__currentCaptureEvents.push({event:"request", method:details.method, tab:details.tabId, at:Date.now()}); }, {urls:["http://*/*"]}); browser.tabs.onUpdated.addListener((tab,change) => { if (change.status) globalThis.__currentCaptureEvents.push({event:"tab", tab, status:change.status, at:Date.now()}); }); browser.downloads.onCreated.addListener(item => globalThis.__currentCaptureEvents.push({event:"download", id:item.id, url:item.url, at:Date.now()})); return true;');
+  await evaluate('globalThis.__currentDownloads = []; browser.downloads.onCreated.addListener(item => globalThis.__currentDownloads.push({event:"created", id:item.id, state:item.state, url:item.url, finalUrl:item.finalUrl,filename:item.filename,paused:item.paused})); browser.downloads.onChanged.addListener(delta => globalThis.__currentDownloads.push({event:"changed", ...delta})); browser.downloads.onErased.addListener(id => globalThis.__currentDownloads.push({event:"erased", id})); return true;');
+  await evaluate('globalThis.__currentCaptureEvents = []; browser.webRequest.onBeforeRequest.addListener(details => { globalThis.__currentCaptureEvents.push({event:"request", method:details.method, tab:details.tabId,url:details.url, at:Date.now()}); }, {urls:["http://*/*"]}); browser.webRequest.onHeadersReceived.addListener(details => { globalThis.__currentCaptureEvents.push({event:"headers",method:details.method,tab:details.tabId,url:details.url,at:Date.now()}); }, {urls:["http://*/*"]}); browser.tabs.onUpdated.addListener((tab,change) => { if (change.status) globalThis.__currentCaptureEvents.push({event:"tab", tab, status:change.status, at:Date.now()}); }); browser.downloads.onCreated.addListener(item => globalThis.__currentCaptureEvents.push({event:"download", id:item.id, url:item.url, at:Date.now()})); return true;');
   await page.bringToFront();
   await page.locator('#download').click();
   const captured = await until(async () => (await command('status')).jobs.find(job => job.request.urls[0] === `${fixtureURL}/slow.bin`), 'Firefox automatic download handoff');
@@ -266,6 +286,74 @@ try {
   `), 'Firefox page media discovery');
   assert.ok(media.url.endsWith('/video.mp4'));
 
+  await evaluate(`const popup = ${popupExpression}; popup.document.getElementById("capture-settings").click(); return true;`);
+  const optionsExpression = 'browser.extension.getViews({type:"tab"}).find(view => view.location.pathname === "/options.html")';
+  await until(() => evaluate(`return ${optionsExpression}?.document.getElementById("save-settings")?.disabled === false;`), 'Firefox actual capture settings ready');
+  async function savePolicy({fileTypes = [], excludedDomains = [], excludedURLPatterns = []} = {}) {
+    const policy = {fileTypes, excludedDomains, excludedURLPatterns};
+    await evaluate(`const view = ${optionsExpression}; view.document.getElementById("file-types").value = ${JSON.stringify(fileTypes.join(', '))}; view.document.getElementById("excluded-domains").value = ${JSON.stringify(excludedDomains.join('\n'))}; view.document.getElementById("excluded-url-patterns").value = ${JSON.stringify(excludedURLPatterns.join('\n'))}; view.document.getElementById("save-settings").click(); return true;`);
+    await until(async () => {
+      const saved = await evaluate('return (await browser.storage.local.get("capturePolicy")).capturePolicy;');
+      assert.deepEqual(saved, policy);
+      return true;
+    }, 'Firefox capture rules persisted');
+    await until(() => evaluate(`return ${optionsExpression}.document.getElementById("settings-feedback").textContent === "Capture rules saved.";`), 'Firefox save feedback');
+    assert.equal(await evaluate(`return ${optionsExpression}.document.getElementById("settings-error").hidden;`), true);
+  }
+  const policyBytes = Buffer.from(Array.from({length:2 * 1024 * 1024}, (_, index) => index & 255));
+  const policyHash = sha256(policyBytes);
+  async function staysInBrowser(selector, path, clickOptions) {
+    await page.bringToFront();
+    // Ordinary Firefox downloads do not emit Playwright's intercepted-download
+    // navigation signal. Wait for browser.downloads completion below instead.
+    await page.locator(selector).click({noWaitAfter:true, ...clickOptions});
+    const download = await until(() => evaluate(`return (await browser.downloads.search({})).find(item => item.url === ${JSON.stringify(fixtureURL + path)} && item.state === 'complete') || null;`), `${path} completes in Firefox`);
+    assert.ok(download.filename.endsWith(path), 'Firefox preserves the server filename for capture filtering');
+    assert.equal(sha256(await readFile(download.filename)), policyHash);
+    assert.equal((await command('status')).jobs.some(job => job.request.urls[0] === fixtureURL + path), false, `${path} never becomes a native job`);
+    // Clear Juggler's pending download navigation before its next locator
+    // action; browser-default downloads have no intercepted-download signal.
+    await page.goto(`${fixtureURL}/page`);
+  }
+  await savePolicy({fileTypes:['zip']});
+  await staysInBrowser('#policy-type', '/policy-type.bin');
+  await savePolicy({fileTypes:['bin'], excludedDomains:['127.0.0.1']});
+  await staysInBrowser('#policy-domain', '/policy-domain.bin');
+  await savePolicy({fileTypes:['bin'], excludedURLPatterns:[fixtureURL + '/policy-pattern*']});
+  await staysInBrowser('#policy-pattern', '/policy-pattern.bin');
+  await evaluate(`const view = ${optionsExpression}; view.document.getElementById("excluded-domains").value = "https://invalid.example/path"; view.document.getElementById("save-settings").click(); return true;`);
+  await until(() => evaluate(`return ${optionsExpression}.document.getElementById("settings-error").hidden === false;`), 'Firefox invalid settings error visible');
+  assert.deepEqual(await evaluate('return (await browser.storage.local.get("capturePolicy")).capturePolicy.excludedDomains;'), [], 'malformed settings preserve saved rules');
+  await evaluate(`const popup = ${popupExpression}; popup.document.getElementById("urls").value = ${JSON.stringify(fixtureURL + '/policy-pattern.bin')}; popup.document.getElementById("add-button").click(); return true;`);
+  const explicit = await until(async () => (await command('status')).jobs.find(job => job.request.urls[0] === fixtureURL + '/policy-pattern.bin' && job.status === 'complete'), 'Firefox manual excluded URL completes');
+  assert.equal(sha256(await readFile(join(explicit.directory, explicit.filename))), policyHash);
+  await savePolicy({fileTypes:['bin']});
+  // Firefox on macOS suppresses normal navigation for Alt-click even with no
+  // extension installed. Give this fixture a site-owned navigation handler so
+  // a real trusted Alt-click still starts the download and exercises the bypass.
+  await page.locator('#policy-alt').evaluate(anchor => anchor.addEventListener('click', event => {
+    if (event.isTrusted && event.altKey) { event.preventDefault(); location.assign(anchor.href); }
+  }));
+  await staysInBrowser('#policy-alt', '/policy-alt.bin', {modifiers:['Alt']});
+  await staysInBrowser('#policy-post', '/policy-post.bin');
+  await page.locator('#policy-allowed').click();
+  const allowed = await until(async () => (await command('status')).jobs.find(job => job.request.urls[0] === fixtureURL + '/policy-allowed.bin' && job.status === 'complete'), 'Firefox included browser download completes');
+  assert.equal(sha256(await readFile(join(allowed.directory, allowed.filename))), policyHash);
+  const userAgent = await page.evaluate(() => navigator.userAgent);
+  assert.equal(allowed.request.headers['User-Agent'], userAgent, 'Firefox-created native requests carry its real User-Agent');
+  const policyRequests = (await (await fetch(fixtureURL + '/stats')).json()).filter(entry => entry.path === '/policy-allowed.bin');
+  assert.ok(policyRequests.length >= 2);
+  assert.ok(policyRequests.every(entry => entry.userAgent === userAgent), 'the fixture observes the Firefox User-Agent on native network requests');
+  await page.evaluate(() => {
+    const anchor = document.getElementById('policy-synthetic');
+    // A site's own handler can navigate after an untrusted click. It still
+    // must not gain the extension's trusted Alt-click bypass privilege.
+    anchor.addEventListener('click', event => { event.preventDefault(); location.assign(anchor.href); });
+    anchor.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, altKey:true, button:0}));
+  });
+  const synthetic = await until(async () => (await command('status')).jobs.find(job => job.request.urls[0] === fixtureURL + '/policy-synthetic.bin' && job.status === 'complete'), 'Firefox synthetic Alt event cannot forge bypass');
+  assert.equal(sha256(await readFile(join(synthetic.directory, synthetic.filename))), policyHash);
+
   console.log(JSON.stringify({
     browser:context.browser().version(), extensionID,
     passed:[
@@ -274,8 +362,15 @@ try {
       'popup URL → native host → byte-verified file',
       'opt-in automatic GET capture → native acceptance → byte-verified 12 MiB file; browser copy interrupted/removed',
       'HttpOnly cookie and referer handoff → authenticated byte-verified 12 MiB file',
-      'DOM/network page media discovery'
-    ], count:6, automation:{extensionPages:'Firefox DevTools RDP; actual popup DOM controls', website:'Playwright Firefox', browserCopyErasedAfterPause:erased}, hashes:{tiny:tinyHash, large:largeHash}
+      'DOM/network page media discovery',
+      'actual options page persists capture rules and displays validation errors',
+      'file-type, exact-domain, and URL-pattern exclusions retain byte-verified browser downloads',
+      'manual excluded URL → native byte-verified file',
+      'trusted Alt-click bypass retains browser download',
+      'POST remains a byte-verified browser download',
+      'included GET carries Firefox User-Agent through native network requests',
+      'synthetic Alt-click cannot forge bypass'
+    ], count:13, automation:{extensionPages:'Firefox DevTools RDP; actual popup DOM controls', website:'Playwright Firefox', browserCopyErasedAfterPause:erased}, hashes:{tiny:tinyHash, large:largeHash}
   }, null, 2));
 } catch (error) {
   if (debuggerClient) {
