@@ -16,6 +16,6 @@
 - [x] Implement weekday schedules and periodic conditional synchronization through `DownloadService.swift` and focused helpers. Use real validators, independently checked bytes, staging, preserved old destinations on error, ownership checks and cancellation/restart tests.
 - [x] Integrate web-project lifecycle/commands into `DownloadService`, add description editing and quota periods, and build all native products.
 - [x] Add new checks to `scripts/test.sh`; run focused gates and packaged HTTP/media/protocol/browser/cross-volume suites. Browser harness fixes were verified with individual passing packaged browser runs.
-- [ ] Pass the full hosted CI gate for the published source.
+- [x] Pass the [full hosted CI gate](https://github.com/PDGamerSG/current-download-manager/actions/runs/42694525766) for source commit `93b06e8899b620430c673bc64b78d127ca52e983`.
 - [x] Update version, documentation and installed app without opening a foreground window; record material remaining gaps explicitly.
 - [ ] Publish public source and a checksum-verified 0.2.0 release.

@@ -63,6 +63,8 @@ The 0.2.0 release was verified with these passing checks:
 
 Release testing uses Apple silicon, macOS 27.0.1, Swift 6.4, aria2 1.37.0, FFmpeg 9.0.2 and yt-dlp 2026.10.26. Chromium is 158.0.8127.18 and the automated Firefox build is 159.0. The packaged `scripts/test.sh --protocols --cross-volume --browsers` run passed every suite before the browsers; the two browser suites then passed individually after test-harness fixes. `CURRENT_TEST_CLI` and explicit aria2/yt-dlp/FFmpeg/ffprobe overrides pointed into the app. The final browser runs were headless with isolated profiles. The app signature, archive checksums, and byte-for-byte equality of the generated, bundled and zipped extensions were also verified.
 
+The [full hosted macOS 15 source gate](https://github.com/PDGamerSG/current-download-manager/actions/runs/42694525766) passed on commit `93b06e8899b620430c673bc64b78d127ca52e983`, including the native build, all source acceptance suites, authenticated FTP/SFTP and both real browsers. Hosted CI uses `scripts/test.sh --protocols --browsers`; the APFS cross-volume gate was run locally against the packaged application.
+
 The earlier 0.1.1 baseline additionally verified a real public HTTPS download against an independent TLS client's 22,434-byte payload and SHA-256. It is historical evidence, not a fresh production-site test for every release.
 
 The native window was launched against actual fixture downloads; completed, active and paused states were visually checked, and normal Quit exited without an owned aria2 process. Every sheet compiles and was source-reviewed, but individual UI actions, macOS folder/notification permission prompts and all accessibility interactions have not been exhaustively automated.
