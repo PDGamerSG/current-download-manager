@@ -18,4 +18,4 @@
 - [x] Add new checks to `scripts/test.sh`; run focused gates and packaged HTTP/media/protocol/browser/cross-volume suites. Browser harness fixes were verified with individual passing packaged browser runs.
 - [x] Pass the [full hosted CI gate](https://github.com/PDGamerSG/current-download-manager/actions/runs/42694525766) for source commit `93b06e8899b620430c673bc64b78d127ca52e983`.
 - [x] Update version, documentation and installed app without opening a foreground window; record material remaining gaps explicitly.
-- [ ] Publish public source and a checksum-verified 0.2.0 release.
+- [x] Publish public source and [0.2.0 release](https://github.com/PDGamerSG/current-download-manager/releases/tag/v0.2.0); independently download all five public assets without authentication and verify SHA-256, sizes and the exact public tag.

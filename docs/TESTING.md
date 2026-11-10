@@ -65,6 +65,8 @@ Release testing uses Apple silicon, macOS 27.0.1, Swift 6.4, aria2 1.37.0, FFmpe
 
 The [full hosted macOS 15 source gate](https://github.com/PDGamerSG/current-download-manager/actions/runs/42694525766) passed on commit `93b06e8899b620430c673bc64b78d127ca52e983`, including the native build, all source acceptance suites, authenticated FTP/SFTP and both real browsers. Hosted CI uses `scripts/test.sh --protocols --browsers`; the APFS cross-volume gate was run locally against the packaged application.
 
+All five [published 0.2.0 release assets](https://github.com/PDGamerSG/current-download-manager/releases/tag/v0.2.0) were fetched without authentication. Their sizes and SHA-256 hashes matched the local release files and `SHA256SUMS`; the public tag resolved to `4b8997cda12c64c16ba98d33873100f0999832bd` (the tested source plus its documentation record). The installed app matches the published executables, and the native browser wrapper points to its permanent installed location. The app was left closed.
+
 The earlier 0.1.1 baseline additionally verified a real public HTTPS download against an independent TLS client's 22,434-byte payload and SHA-256. It is historical evidence, not a fresh production-site test for every release.
 
 The native window was launched against actual fixture downloads; completed, active and paused states were visually checked, and normal Quit exited without an owned aria2 process. Every sheet compiles and was source-reviewed, but individual UI actions, macOS folder/notification permission prompts and all accessibility interactions have not been exhaustively automated.
